@@ -1,0 +1,33 @@
+# --- Secrets: NEVER commit these ---
+.env
+.env.*
+!.env.example
+*.pem
+service-account*.json
+*service_account*.json
+*-key.json
+credentials.json
+
+# --- Database (lives on the host's persistent disk, not in git) ---
+data/
+*.sqlite
+*.sqlite3
+*.db
+
+# --- Node ---
+node_modules/
+npm-debug.log*
+
+# --- TypeScript build output (compiled from src/, produced by `npm run build`) ---
+dist/
+*.tsbuildinfo
+
+# --- Logs / runtime ---
+logs/
+*.log
+
+# --- OS / editor cruft ---
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

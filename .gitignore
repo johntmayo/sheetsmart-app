@@ -1,0 +1,31 @@
+# --- Secrets: NEVER commit these ---
+.env
+.env.*
+*.pem
+# Google service-account key files (any JSON key). Note: legacy-appsscript/*.gs are code, not keys, and are fine to commit.
+service-account*.json
+*service_account*.json
+*-key.json
+credentials.json
+
+# --- Database (lives on the host's persistent disk, not in git) ---
+*.sqlite
+*.sqlite3
+*.db
+
+# --- Node ---
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# --- Logs / runtime ---
+logs/
+*.log
+
+# --- OS / editor cruft ---
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

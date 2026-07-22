@@ -1,0 +1,535 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <base target="_top">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Chivo:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+      :root {
+        --ink: #1f2933;
+        --muted: #64748b;
+        --paper: #f7f9fb;
+        --panel: #ffffff;
+        --line: #d7dce2;
+        --accent: #22577a;
+        --accent-soft: #e6f1f6;
+        --warning: #8a5a00;
+        --warning-soft: #fff4d6;
+        --error: #9f1d20;
+        --error-soft: #fde7e8;
+        --ok: #256a3b;
+        --ok-soft: #e6f4ea;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        background: var(--paper);
+        color: var(--ink);
+        font: 14px/1.5 "Chivo", Arial, Helvetica, sans-serif;
+      }
+
+      button,
+      input,
+      select {
+        font: inherit;
+      }
+
+      .shell {
+        min-height: 100vh;
+        padding: 20px;
+      }
+
+      .masthead {
+        border-bottom: 1px solid var(--line);
+        padding-bottom: 14px;
+        margin-bottom: 16px;
+      }
+
+      .eyebrow {
+        color: var(--accent);
+        font: 700 11px/1.2 "Chivo", Arial, Helvetica, sans-serif;
+        letter-spacing: 0.12em;
+        margin-bottom: 7px;
+        text-transform: uppercase;
+      }
+
+      h1 {
+        font-size: 26px;
+        font-weight: 700;
+        line-height: 1.08;
+        margin: 0 0 8px;
+      }
+
+      h2 {
+        font-size: 17px;
+        font-weight: 700;
+        margin: 0 0 10px;
+      }
+
+      h3 {
+        font: 700 12px/1.2 "Chivo", Arial, Helvetica, sans-serif;
+        letter-spacing: 0.06em;
+        margin: 0 0 8px;
+        text-transform: uppercase;
+      }
+
+      p {
+        margin: 0 0 10px;
+      }
+
+      .muted {
+        color: var(--muted);
+      }
+
+      .workflow-list {
+        display: grid;
+        gap: 10px;
+        margin-bottom: 16px;
+      }
+
+      .workflow-card {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        cursor: pointer;
+        padding: 13px;
+        text-align: left;
+        width: 100%;
+      }
+
+      .workflow-card:hover,
+      .workflow-card.active {
+        border-color: var(--accent);
+        background: var(--accent-soft);
+      }
+
+      .workflow-title {
+        display: block;
+        font-weight: 700;
+        margin-bottom: 4px;
+      }
+
+      .section {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        margin-bottom: 14px;
+        padding: 14px;
+      }
+
+      .kv {
+        display: grid;
+        gap: 8px;
+      }
+
+      .kv-row {
+        border-bottom: 1px solid #edf0f3;
+        display: grid;
+        gap: 3px;
+        padding-bottom: 8px;
+      }
+
+      .kv-row:last-child {
+        border-bottom: 0;
+        padding-bottom: 0;
+      }
+
+      .label {
+        color: var(--muted);
+        font: 700 11px/1.2 "Chivo", Arial, Helvetica, sans-serif;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+      }
+
+      .mapping-list,
+      .check-list,
+      .result-grid {
+        display: grid;
+        gap: 8px;
+      }
+
+      .mapping {
+        border-left: 3px solid var(--line);
+        padding-left: 9px;
+      }
+
+      .policy {
+        color: var(--muted);
+        display: block;
+        font-size: 12px;
+        margin-top: 2px;
+      }
+
+      .check {
+        border: 1px solid var(--line);
+        padding: 9px;
+      }
+
+      .check.ok {
+        background: var(--ok-soft);
+        border-color: #b9dfc3;
+        color: var(--ok);
+      }
+
+      .check.warning {
+        background: var(--warning-soft);
+        border-color: #efd28a;
+        color: var(--warning);
+      }
+
+      .check.error {
+        background: var(--error-soft);
+        border-color: #efb3b6;
+        color: var(--error);
+      }
+
+      .actions {
+        display: grid;
+        gap: 9px;
+        grid-template-columns: 1fr 1fr;
+      }
+
+      .button {
+        border: 1px solid var(--accent);
+        cursor: pointer;
+        padding: 10px 12px;
+      }
+
+      .button.primary {
+        background: var(--accent);
+        color: white;
+      }
+
+      .button.secondary {
+        background: white;
+        color: var(--accent);
+      }
+
+      .button:disabled {
+        border-color: var(--line);
+        color: var(--muted);
+        cursor: default;
+        opacity: 0.7;
+      }
+
+      .status {
+        color: var(--muted);
+        min-height: 20px;
+        padding-top: 10px;
+      }
+
+      .global-status {
+        background: var(--accent-soft);
+        border: 1px solid #b7d3df;
+        color: var(--accent);
+        margin-bottom: 14px;
+        padding: 10px 12px;
+      }
+
+      .global-status.error {
+        background: var(--error-soft);
+        border-color: #efb3b6;
+        color: var(--error);
+      }
+
+      .result-grid {
+        grid-template-columns: 1fr 1fr;
+      }
+
+      .result-stat {
+        background: #f4f6f8;
+        padding: 10px;
+      }
+
+      .result-stat strong {
+        display: block;
+        font-size: 22px;
+        line-height: 1;
+      }
+
+      .hidden {
+        display: none;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="shell">
+      <header class="masthead">
+        <div class="eyebrow">Sheet Smart</div>
+        <h1>Guided Dashboard</h1>
+        <p class="muted">Run common spreadsheet workflows without juggling Settings, mappings, and log tabs by hand.</p>
+      </header>
+
+      <section>
+        <h2>Workflows</h2>
+        <div id="globalStatus" class="global-status hidden"></div>
+        <div id="workflowList" class="workflow-list">
+          <p class="muted">Loading workflows...</p>
+        </div>
+      </section>
+
+      <section id="details" class="hidden">
+        <div class="section">
+          <h2 id="workflowName"></h2>
+          <div class="kv">
+            <div class="kv-row">
+              <div class="label">Source</div>
+              <div id="sourceTab"></div>
+            </div>
+            <div class="kv-row">
+              <div class="label">Match Column</div>
+              <div id="matchColumn"></div>
+            </div>
+            <div class="kv-row">
+              <div class="label">Notes</div>
+              <div id="workflowNotes" class="muted"></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="section">
+          <h3>Columns</h3>
+          <div id="mappingList" class="mapping-list"></div>
+        </div>
+
+        <div class="section">
+          <h3>Readiness</h3>
+          <div id="checkList" class="check-list"></div>
+        </div>
+
+        <div class="section">
+          <h3>Run</h3>
+          <div class="actions">
+            <button id="dryRunButton" class="button secondary" type="button">Dry Run</button>
+            <button id="liveRunButton" class="button primary" type="button">Run Live</button>
+          </div>
+          <div id="status" class="status"></div>
+        </div>
+
+        <div id="resultPanel" class="section hidden">
+          <h3 id="resultTitle">Last Result</h3>
+          <div id="resultGrid" class="result-grid"></div>
+          <p id="resultLog" class="muted" style="margin-top: 10px;"></p>
+        </div>
+      </section>
+    </main>
+
+    <script>
+      var state = {
+        selectedWorkflowId: '',
+        ready: false
+      };
+
+      function setStatus(message) {
+        document.getElementById('status').textContent = message || '';
+      }
+
+      function setGlobalStatus(message, isError) {
+        var el = document.getElementById('globalStatus');
+        if (!message) {
+          el.className = 'global-status hidden';
+          el.textContent = '';
+          return;
+        }
+        el.className = 'global-status' + (isError ? ' error' : '');
+        el.textContent = message;
+      }
+
+      function setBusy(isBusy) {
+        document.getElementById('dryRunButton').disabled = isBusy;
+        document.getElementById('liveRunButton').disabled = isBusy || !state.ready;
+      }
+
+      function renderWorkflowList(model) {
+        var list = document.getElementById('workflowList');
+        list.innerHTML = '';
+
+        if (!model.workflows || model.workflows.length === 0) {
+          list.innerHTML = '<p class="muted">No enabled workflows found. Run "Set Up Config Tabs" and review the Workflow Presets tab.</p>';
+          return;
+        }
+
+        model.workflows.forEach(function (workflow) {
+          var button = document.createElement('button');
+          button.type = 'button';
+          button.setAttribute('data-workflow-id', workflow.id);
+          button.className = 'workflow-card' + (workflow.id === state.selectedWorkflowId ? ' active' : '');
+          var subtitle = workflow.mappingCount > 0
+            ? workflow.mappingCount + ' mapped column' + (workflow.mappingCount === 1 ? '' : 's') + ' · match by ' + escapeHtml(workflow.matchColumn || '(not set)')
+            : escapeHtml(workflow.sourceLabel || workflow.operation);
+          button.innerHTML =
+            '<span class="workflow-title">' + escapeHtml(workflow.name) + '</span>' +
+            '<span class="muted">' + subtitle + '</span>';
+          button.onclick = function () { loadWorkflow(workflow.id); };
+          list.appendChild(button);
+        });
+      }
+
+      function renderDetails(workflow) {
+        state.selectedWorkflowId = workflow.id;
+        state.ready = !!workflow.ready;
+
+        setGlobalStatus('', false);
+        document.getElementById('details').classList.remove('hidden');
+        document.getElementById('workflowName').textContent = workflow.name;
+        document.getElementById('sourceTab').textContent = workflow.sourceLabel || workflow.sourceTabName || '(first tab)';
+        document.getElementById('matchColumn').textContent = workflow.matchColumn || '(not set)';
+        document.getElementById('workflowNotes').textContent = workflow.notes || '';
+
+        var mappingList = document.getElementById('mappingList');
+        mappingList.innerHTML = '';
+        if (!workflow.mappings || workflow.mappings.length === 0) {
+          mappingList.innerHTML = '<p class="muted">No column mappings are needed for this workflow.</p>';
+        }
+        (workflow.mappings || []).forEach(function (mapping) {
+          var item = document.createElement('div');
+          item.className = 'mapping';
+          item.innerHTML =
+            escapeHtml(mapping.source) + ' -> ' + escapeHtml(mapping.target) +
+            '<span class="policy">Policy: ' + escapeHtml(mapping.policy || 'fill_blank') + '</span>';
+          mappingList.appendChild(item);
+        });
+
+        var checkList = document.getElementById('checkList');
+        checkList.innerHTML = '';
+        workflow.checks.forEach(function (check) {
+          var item = document.createElement('div');
+          item.className = 'check ' + check.status;
+          item.textContent = check.message;
+          checkList.appendChild(item);
+        });
+
+        document.getElementById('resultPanel').classList.add('hidden');
+        setStatus(workflow.ready ? 'Ready. Start with Dry Run.' : 'Fix errors before running live.');
+        setBusy(false);
+        refreshWorkflowCards();
+        document.getElementById('details').scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }
+
+      function renderResult(result) {
+        document.getElementById('resultPanel').classList.remove('hidden');
+        document.getElementById('resultTitle').textContent = result.mode + ' Complete';
+        renderResultMetrics(result);
+        var processed = result.sheetsProcessed ? result.sheetsProcessed + ' sheet(s) processed. ' : '';
+        var extraLogs = result.secondaryLogTab ? ' Also review "' + result.secondaryLogTab + '".' : '';
+        var summary = result.summaryLines && result.summaryLines.length ? ' ' + result.summaryLines.join(' ') : '';
+        document.getElementById('resultLog').textContent =
+          processed + 'Details were written to "' + result.logTab + '".' + extraLogs + summary;
+      }
+
+      function renderResultMetrics(result) {
+        var grid = document.getElementById('resultGrid');
+        grid.innerHTML = '';
+        var metrics = result.metrics || [
+          { label: 'Columns added', value: result.columnsAdded || 0 },
+          { label: 'Filled', value: result.cellsFilled || 0 },
+          { label: 'Overwritten', value: result.cellsOverwritten || 0 },
+          { label: 'Conflicts', value: result.conflicts || 0 },
+          { label: 'Skipped', value: result.skipped || 0 },
+          { label: 'Errors', value: result.errors || 0 }
+        ];
+        metrics.forEach(function (metric) {
+          var item = document.createElement('div');
+          item.className = 'result-stat';
+          item.innerHTML = '<strong>' + escapeHtml(metric.value) + '</strong><span>' + escapeHtml(metric.label) + '</span>';
+          grid.appendChild(item);
+        });
+      }
+
+      function loadDashboard() {
+        google.script.run
+          .withSuccessHandler(renderWorkflowList)
+          .withFailureHandler(showError)
+          .getSheetSmartDashboardModel();
+      }
+
+      function refreshWorkflowCards() {
+        google.script.run
+          .withSuccessHandler(function (model) {
+            var selected = state.selectedWorkflowId;
+            renderWorkflowList(model);
+            state.selectedWorkflowId = selected;
+            markSelectedWorkflow();
+          })
+          .withFailureHandler(showError)
+          .getSheetSmartDashboardModel();
+      }
+
+      function markSelectedWorkflow() {
+        var cards = document.querySelectorAll('.workflow-card');
+        for (var i = 0; i < cards.length; i++) {
+          cards[i].classList.remove('active');
+        }
+        if (!state.selectedWorkflowId) return;
+        for (var j = 0; j < cards.length; j++) {
+          if (cards[j].getAttribute('data-workflow-id') === state.selectedWorkflowId) {
+            cards[j].classList.add('active');
+          }
+        }
+      }
+
+      function loadWorkflow(workflowId) {
+        state.selectedWorkflowId = workflowId;
+        state.ready = false;
+        setGlobalStatus('Opening workflow...', false);
+        document.getElementById('details').classList.remove('hidden');
+        document.getElementById('workflowName').textContent = 'Loading workflow...';
+        document.getElementById('sourceTab').textContent = '';
+        document.getElementById('matchColumn').textContent = '';
+        document.getElementById('workflowNotes').textContent = '';
+        document.getElementById('mappingList').innerHTML = '<p class="muted">Loading mappings...</p>';
+        document.getElementById('checkList').innerHTML = '<div class="check">Checking spreadsheet access and headers...</div>';
+        document.getElementById('resultPanel').classList.add('hidden');
+        setStatus('Checking workflow...');
+        setBusy(true);
+        document.getElementById('details').scrollIntoView({ behavior: 'smooth', block: 'start' });
+        google.script.run
+          .withSuccessHandler(renderDetails)
+          .withFailureHandler(showError)
+          .getWorkflowDetails(workflowId);
+      }
+
+      function runWorkflow(dryRun) {
+        setBusy(true);
+        setStatus(dryRun ? 'Running dry run...' : 'Running live workflow...');
+        var call = google.script.run
+          .withSuccessHandler(function (result) {
+            renderResult(result);
+            setStatus(dryRun ? 'Dry run complete. Review the log before running live.' : 'Live run complete.');
+            setBusy(false);
+          })
+          .withFailureHandler(showError);
+
+        if (dryRun) {
+          call.runWorkflowDryRun(state.selectedWorkflowId);
+        } else {
+          call.runWorkflowLive(state.selectedWorkflowId);
+        }
+      }
+
+      function showError(error) {
+        setBusy(false);
+        var message = error && error.message ? error.message : String(error);
+        setGlobalStatus(message, true);
+        document.getElementById('details').classList.remove('hidden');
+        setStatus(message);
+      }
+
+      function escapeHtml(value) {
+        return String(value || '')
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;')
+          .replace(/'/g, '&#039;');
+      }
+
+      document.getElementById('dryRunButton').onclick = function () { runWorkflow(true); };
+      document.getElementById('liveRunButton').onclick = function () { runWorkflow(false); };
+      loadDashboard();
+    </script>
+  </body>
+</html>
