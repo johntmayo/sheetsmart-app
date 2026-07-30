@@ -7,7 +7,8 @@
 //  - Fill blanks only by default (fill_blank).
 //  - Never write a blank source over a target value (rule 3).
 //  - Log conflicts instead of overwriting disagreements (rule 4).
-//  - resident_id (and any protected column) is never written (rule 5).
+//  - resident_id (and any protected column) is never changed on an existing row
+//    (rule 5). A newly appended row must carry its identity from creation.
 //  - Only `overwrite`-policy columns may replace a non-blank value (rule 7).
 //  - Unlisted columns default to conflict-only (handled by the caller/default).
 
@@ -40,6 +41,11 @@ export interface DecideWriteArgs {
   policy?: string | null;
   /** Columns forced to 'never'. Defaults to DEFAULT_PROTECTED_COLUMNS. */
   protectedColumns?: string[];
+}
+
+export interface DecideAppendCellArgs {
+  column?: string;
+  source?: CellValue;
 }
 
 export const VALID_POLICIES: Policy[] = ['fill_blank', 'overwrite', 'conflict', 'never'];
@@ -104,6 +110,24 @@ export function decideWrite({ column, target, source, policy, protectedColumns }
   }
   // fill_blank or conflict on a non-blank differing target -> log a conflict.
   return decision('conflict', effectivePolicy, 'Values differ and policy does not allow overwrite', false);
+}
+
+/**
+ * Guard a value used to create a brand-new row.
+ *
+ * Identity values are permitted here because an appended row without its
+ * resident_id could not be safely matched, deduplicated, or undone. This does
+ * not permit changing resident_id on an existing row; decideWrite() continues
+ * to reject that in every policy.
+ */
+export function decideAppendCell({ column, source }: DecideAppendCellArgs = {}): WriteDecision {
+  return decideWrite({
+    column,
+    target: undefined,
+    source,
+    policy: 'fill_blank',
+    protectedColumns: [],
+  });
 }
 
 function decision(action: WriteAction, effectivePolicy: Policy, reason: string, willWrite: boolean): WriteDecision {

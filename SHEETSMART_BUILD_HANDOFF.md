@@ -4,7 +4,9 @@
 **Companion documents (same folder):**
 - `README.md` — start-here orientation and current status. Read it first.
 - `WEB_APP_MIGRATION_SPEC.md` — the product/requirements detail (the "what" and "why" of every workflow).
-- `legacy-appsscript/` — the **current, working implementation** in Google Apps Script. This is the behavioral source of truth. See Section 1.5.
+- `ZONE_PIPELINE_SPEC.md` — the **upstream half of the lifecycle**: assigning zones + captain info (lat/lon → Mapbox polygon) and generating the captain sheets. Read it alongside this handoff; it defines two workflows referenced throughout.
+- `legacy-appsscript/` — the **current, working sync/audit implementation** in Google Apps Script. Behavioral source of truth for step ③ (ongoing alignment). See Section 1.5.
+- `reference-tools/data-pull-extension/` — the **current, working zone-assignment + captain-sheet-generation tools** (a Chrome extension + a bound Apps Script). Behavioral source of truth for steps ① and ②. See `ZONE_PIPELINE_SPEC.md`.
 
 **Precedence when documents disagree:** this handoff wins on *architecture*; the spec wins on *workflow intent*; the **legacy code in `legacy-appsscript/` wins on exact behavior** (it is what actually runs today).
 
@@ -31,10 +33,15 @@ There are two kinds of reader here:
 
 **The problem:** all ~55 captain sheets were originally derived from the master, but over time they drift — columns get renamed/added/dropped, rows go missing, values get entered in one place but not another. Keeping them aligned by hand is slow and error-prone.
 
-**What SheetSmart does:**
-- **Audits** every captain sheet against the master — flags column drift, missing/extra rows, duplicate `resident_id` values, and completeness gaps.
-- **Moves data** between sheets — imports external sales data into the master, pushes master data out to captain sheets, and pulls captain-entered data back into the master (filling blanks, appending missing rows, and logging conflicts instead of overwriting).
-- **Manages schema** — adds, renames, and deletes columns across one or many captain sheets.
+**What SheetSmart does** — it owns the full data lifecycle, in three stages:
+- **① Assigns zones + captain info** — for each resident in the master, uses their lat/lon and a set of ~120 Mapbox zone polygons (point-in-polygon) to append `ZoneName` and the neighborhood captain's name/phone/email. *(See `ZONE_PIPELINE_SPEC.md`, Workflow A.)*
+- **② Generates the captain sheets** — creates one spreadsheet per zone from the zone-tagged master, preserving dropdowns/checkboxes. *(See `ZONE_PIPELINE_SPEC.md`, Workflow B.)*
+- **③ Keeps everything aligned over time** (the original core):
+  - **Audits** every captain sheet against the master — flags column drift, missing/extra rows, duplicate `resident_id` values, and completeness gaps.
+  - **Moves data** between sheets — imports external sales data into the master, pushes master data out to captain sheets, and pulls captain-entered data back into the master (filling blanks, appending missing rows, and logging conflicts instead of overwriting).
+  - **Manages schema** — adds, renames, and deletes columns across one or many captain sheets.
+
+Stages ① and ② run at setup and when new zones/residents appear; stage ③ is the day-to-day loop. Today these are three disconnected tools (a Chrome extension, a bound Apps Script, and the sync scripts) plus manual steps — SheetSmart unifies them.
 
 **Who uses it:** exactly one person — the owner/admin, who owns and shares all the sheets centrally via a Google service account. Captains never touch SheetSmart; they only ever work in their own spreadsheets.
 
@@ -101,7 +108,8 @@ The owner is the only user and is not a developer. Every choice below optimizes 
 | Job runner | **In-process queue**, one job at a time, tracked in a `jobs` table | No Redis, no second service. An always-on server can run a multi-minute job directly. See job-durability rules below. |
 | Hosting | **Render.com** (Railway.com as backup) | Friendly web dashboard (not CLI-only), stays always-on so long jobs finish, supports a persistent disk. This is the thing Vercel could not do. |
 | Login | **Single admin password** in an environment variable + a signed session cookie | Simplest possible gate for a one-person tool on a public URL. |
-| Google access | **A brand-new dedicated Google service account** | Isolated from the dashboard. Uses Sheets API + Drive API (read) to start. |
+| Google access | **A brand-new dedicated Google service account** | Isolated from the dashboard. Uses Sheets API + Drive API (read) to start; **Drive write is required for captain-sheet generation** — see below and `ZONE_PIPELINE_SPEC.md` §5.1. |
+| Zone data | **Mapbox Datasets API** (zone polygons + captain contact) | The ~120 zone polygons already live in a Mapbox dataset. Fetched with a token env var (`MAPBOX_TOKEN`); the point-in-polygon join runs server-side. See `ZONE_PIPELINE_SPEC.md`. |
 
 **Explicitly rejected for v1 (to keep it simple):** TypeScript, React/Next.js, Postgres, Redis/BullMQ, Docker, Kubernetes, Cloud Run, multi-user auth, Google OAuth login. Each is noted below as a *future upgrade path* only.
 
@@ -151,7 +159,7 @@ function getSheetsClient() {
 ```
 Store the credential as **base64** in one env var (`GOOGLE_SERVICE_ACCOUNT_JSON_B64`) — it avoids newline/escaping problems when pasting a multi-line JSON key into a hosting dashboard. Also create a Drive client (`google.drive({version:'v3', auth})`) for folder listing.
 
-> Note on Drive scope: `drive.readonly` is enough to *list* the captain folder and read file metadata. Writing cells/columns is done through the **Sheets** API, which only needs the `spreadsheets` scope on sheets the service account has been shared into as Editor. You do not need broad Drive write scope for the current feature set.
+> Note on Drive scope: `drive.readonly` is enough to *list* the captain folder and read file metadata. Writing cells/columns is done through the **Sheets** API, which only needs the `spreadsheets` scope on sheets the service account has been shared into as Editor — so **stages ① and ③ do not need Drive write**. The **exception is captain-sheet generation (Workflow B / stage ②)**, which creates new Drive files and therefore needs `drive` (or `drive.file`) plus a deliberate file-ownership/sharing decision — see `ZONE_PIPELINE_SPEC.md` §5.1. Keep that elevated scope scoped to the generation workflow.
 
 ### 4.2 Retry with exponential backoff + jitter (REQUIRED)
 Google Sheets API returns transient errors (429 rate limit, 503, 500, "backend error", "internal error", "unable to parse range") constantly during bulk work. Wrap **every** Sheets/Drive call in a retry helper:
@@ -217,6 +225,9 @@ Captains edit their sheets live, and a folder-wide job runs for minutes. A row y
 - For append operations, re-check "is this `resident_id` already present?" against a fresh read, so an interrupted-and-rerun job doesn't append duplicates.
 - The fill-blank-only + append-if-absent + join-by-id design (Section 5) is what makes this safe and what makes interrupted live jobs safe to re-run (3.2).
 
+### 4.9 Point-in-polygon zone assignment (port the existing code, don't rewrite it)
+Stage ① (assign zones) needs to test which of ~120 Mapbox polygons contains each resident's lat/lon. **This is already solved** in `reference-tools/data-pull-extension/background.js` as plain, browser-independent JavaScript: `computeBBoxForGeom`, `buildSpatialIndex`, `bboxContains`, `pointInRing`, `pointInPolygon` (handles holes), `pointInMultiPolygon`, and `findContainingFeature` (bbox pre-filter → exact test, first match wins). Lift these into a `zones.js` module nearly verbatim and unit-test them (point inside / outside / in a hole / in a multipolygon). The Mapbox fetch is a single HTTPS call with a token. Full design in `ZONE_PIPELINE_SPEC.md`.
+
 ---
 
 ## 5. The safety model (NON-NEGOTIABLE — carry over verbatim)
@@ -242,13 +253,13 @@ The building agent should implement a single **write-guard layer** that every wr
 
 Translate the spec's entities into SQLite tables. Suggested minimum:
 
-- **connections** — a named reference to a Google spreadsheet, a Drive folder, or an external source. Fields: `id`, `name`, `type` (`master` | `captain_folder` | `external`), `google_id` (spreadsheet or folder ID), `notes`, `created_at`.
-- **workflows** — a named operation. Fields: `id`, `name`, `type` (see Section 7 list), `source_connection_id`, `target_connection_id`, `match_column` (varies by workflow — often `resident_id`, sometimes `APN`), `source_tab`, `notes`, `created_at`.
+- **connections** — a named reference to a Google spreadsheet, a Drive folder, an external source, or a zone source. Fields: `id`, `name`, `type` (`master` | `captain_folder` | `external` | `zone_source`), `google_id` (spreadsheet or folder ID) *or* zone-source fields (`provider`, `username`, `dataset_id`; token is a secret env var, not stored here), `notes`, `created_at`. (See `ZONE_PIPELINE_SPEC.md` §5.2 for `zone_source`.)
+- **workflows** — a named operation. Fields: `id`, `name`, `type` (see Section 7 list — includes `assign_zones` and `generate_captain_sheets`), `source_connection_id`, `target_connection_id`, `match_column` (varies by workflow — often `resident_id`, sometimes `APN`), `source_tab`, `notes`, `created_at`.
 - **column_mappings** — `id`, `workflow_id`, `source_column`, `target_column`.
 - **column_policies** — `id`, `workflow_id`, `column_name`, `policy` (`fill_blank`|`overwrite`|`conflict`|`never`).
 - **sensitive_columns** — `id`, `column_name` (fields flagged when pushed to captain sheets).
 - **runs** — `id`, `workflow_id`, `mode` (`dry`|`live`), `status` (`queued`|`running`|`succeeded`|`failed`|`cancelled`|`interrupted`), `started_at`, `finished_at`, summary counts (JSON blob is fine), `actor`.
-- **run_log_entries** — `id`, `run_id`, `spreadsheet`, `row`, `column`, `resident_id`, `type` (`fill`|`overwrite`|`conflict`|`append`|`skip`|`sensitive`|`error`), `existing_value`, `incoming_value`, `message`.
+- **run_log_entries** — `id`, `run_id`, `spreadsheet`, `row`, `column`, `resident_id`, `type` (`fill`|`overwrite`|`conflict`|`append`|`skip`|`sensitive`|`error`|`zone_assign`|`zone_unassigned`|`zone_missing_coords`|`zone_conflict`|`sheet_created`), `existing_value`, `incoming_value`, `message`.
 - **conflicts** — a review view derived from `run_log_entries` where `type='conflict'`, plus `status` (`open`|`resolved`) and `resolution_notes`.
 - **jobs** — `id`, `run_id`, `status`, `progress_json` (per-spreadsheet counts), `enqueued_at`, `started_at`, `finished_at`, `error`.
 
@@ -260,7 +271,11 @@ Put all DB access behind a `db.js` module. Migrate the existing Apps Script conf
 
 Expose each as a named "card" in the UI (plain-English purpose, required connections, Dry Run button, Live Run button, last-run summary, link to run history, and a warning banner for destructive ones).
 
-> **Fidelity note:** this list mirrors the **12 operations that actually exist in the legacy tool** (see `legacy-appsscript/AGENTS.md`). Most operations come in a **single-sheet** and a **whole-folder** variant — keep both; the single-sheet variant is how the owner safely tests on one sheet before running the folder. **"Add columns" is not its own workflow** — cell-fill and pull operations add missing target columns automatically as their first step.
+> **Fidelity note:** the cell-fill/append/pull/schema list below mirrors the **12 operations that actually exist in the legacy sync tool** (see `legacy-appsscript/AGENTS.md`). Most come in a **single-sheet** and a **whole-folder** variant — keep both; the single-sheet variant is how the owner safely tests on one sheet before running the folder. **"Add columns" is not its own workflow** — cell-fill and pull operations add missing target columns automatically as their first step. The two **lifecycle** workflows at the end (assign zones, generate captain sheets) come from the reference tools — full design in `ZONE_PIPELINE_SPEC.md`.
+
+**Lifecycle / setup workflows (from the reference tools — see `ZONE_PIPELINE_SPEC.md`):**
+- **Assign Zones & Captain Info to Master** (`assign_zones`) — for each master row, point-in-polygon against the Mapbox zone dataset to append `ZoneName`, `NC Name`, `NC Phone`, `NC Email`. Deterministic derived fields; dry-run previews changes and logs unassigned/missing-coords/conflict cases. (Stage ①.)
+- **Generate Captain Sheets by Zone** (`generate_captain_sheets`) — create one spreadsheet per selected zone from the zone-tagged master, preserving dropdowns/checkboxes, into the captain folder. Bulk file creation → needs Drive write scope, a file-ownership decision, strong confirmation, and a dry-run that lists files-to-create and flags any that already exist. Does **not** overwrite existing captain sheets. (Stage ②.)
 
 **Cell-fill syncs (add missing columns, then fill blanks; log conflicts):**
 - **Import → Master** — external source (e.g. sales tracker) into master, matched by the configured match column (often APN). *Friendly name: "Update Master From Sales Tracker."*
@@ -314,7 +329,17 @@ Scope: Rename / Delete columns across one or many captain sheets, each with a st
 Scope: freeze the old config spreadsheet as read-only legacy, keep the Apps Script around only as an emergency fallback for a defined period, update the operating docs.
 **Done when:** SheetSmart is the single place to configure, run, and review all operations, and the owner trusts it enough to stop using the spreadsheet UI.
 
-### 8.5 The parity harness (build this in Phase 2 — it is how you prove correctness)
+### 8.4b Where the lifecycle workflows fit (zones + generation)
+> **Note:** this handoff's Phase 0–5 numbering predates the roadmap. The
+> authoritative phasing is now the **lettered** roadmap in
+> `SHEETSMART_VISION_AND_ROADMAP.md` §7, and the authoritative build order for the
+> two lifecycle workflows is `ZONE_PIPELINE_SPEC.md` §8. In brief: **Assign Zones
+> (Workflow A)** is low-risk and lands in roadmap **Phase B (preview) / Phase C
+> (live)**; **Generate Captain Sheets (Workflow B)** is higher-risk (bulk Drive
+> file creation, elevated scope) and lands around **Phase D**. Both use the same
+> frozen fixtures as the parity harness (8.5).
+
+### 8.5 The parity harness (build it before any live write — it is how you prove correctness)
 "Match the old output" must be mechanical, not eyeballed, because the owner can't verify it by reading code.
 - Before building the port, capture **golden reference outputs** from the legacy tool: run the current audit and a dry run of each core workflow against a **fixed, frozen copy** of the master + a handful of captain sheets, and save the resulting reports (export the report tabs to CSV/JSON and commit them to the repo under `test/golden/`).
 - The new tool's dry run, pointed at the *same frozen copies*, must produce the same set of proposed fills, conflicts, appended rows, skips, and counts. Write a diff step that fails loudly on any divergence.
@@ -353,6 +378,10 @@ These are tasks the AI cannot do for you because they need accounts, a browser, 
 ### C. Pick a login password (needed for Phase 0)
 12. Choose a strong admin password for the app itself (this is what stops strangers from opening SheetSmart on its public URL). Save it in your password manager. You'll give it to the agent to set as the `ADMIN_PASSWORD` env var.
 
+### C2. Mapbox + secret rotation (needed for the zone-assignment workflow)
+12a. Find your Mapbox **username**, the zone **dataset ID**, and a Mapbox **access token** (Mapbox account → Tokens). Give these to the agent — the token becomes the `MAPBOX_TOKEN` env var; the username/dataset ID are stored as a "zone source" connection. (These already exist; they were hardcoded in the old browser extension.)
+12b. **Rotate two old secrets.** The old Data Pull extension shipped with a real Google OAuth **client secret** and a real **Mapbox token** in plaintext. Because they lived in a distributed extension/backup, treat them as possibly exposed: create a **new** Mapbox token (and delete the old one) and, if the old Google OAuth client is still active, rotate/retire its secret. SheetSmart's service account replaces the Google OAuth client entirely, so you won't need the old client secret again.
+
 ### D. Hosting account (needed before Phase 2/3 go online; local testing works without it)
 13. Create an account at <https://render.com> (sign in with GitHub is easiest — see step E). **Plan for the paid always-on web service (~$7/mo) plus a small persistent disk add-on**, not the free tier — the free tier sleeps and will kill long folder-wide jobs (see Section 3.1). The agent will walk you through enabling the persistent disk for the SQLite database file.
 14. When the agent is ready to deploy, it will tell you exactly which buttons to click in Render and which environment variables to paste (the base64 Google key, the sheet IDs, and the admin password).
@@ -373,7 +402,8 @@ These are tasks the AI cannot do for you because they need accounts, a browser, 
 ## 10. Guardrails for the building agent
 
 - **Do not build inside the zone dashboard repo, and do not build inside the legacy `Sheet Smart` folder.** Fresh repo only. This brief folder is documentation, not the app.
-- **Treat `legacy-appsscript/` as read-only reference.** It is the behavioral source of truth; port from it, don't edit it, don't run it.
+- **Treat `legacy-appsscript/` and `reference-tools/` as read-only reference.** They are the behavioral source of truth (sync/audit, and zone-assignment/generation respectively); port from them, don't edit them, don't run them.
+- **The reference `config.js` has redacted secrets.** Do not restore or invent secret values; real values come from the owner as env vars (`MAPBOX_TOKEN`, etc.). See `ZONE_PIPELINE_SPEC.md` §6.
 - **Do not write to any Google Sheet before Phase 3**, and when you do, route every write through the Section 5 write-guard.
 - **Default to dry-run everywhere.** A live write must always be a separate, explicit, confirmed action.
 - **Stop and ask** whenever a decision needs the owner's real-world knowledge (which sheet is the master, whether a column is safe to delete, whether to overwrite). Present choices in plain English.
@@ -389,10 +419,11 @@ These are tasks the AI cannot do for you because they need accounts, a browser, 
 
 If you're the agent picking this up cold, do this in order:
 1. Read this file top to bottom.
-2. Read `legacy-appsscript/AGENTS.md`, then skim `MergeEngine.gs` and `Code.gs` to see the real logic.
-3. Read `WEB_APP_MIGRATION_SPEC.md` for product intent.
-4. Confirm with the owner which items in Section 9 are already done (service account? sheets shared? Render account?).
-5. Start Phase 0. Do not skip the "Done when" gates. Do not write to a real sheet before Phase 3.
+2. Read `legacy-appsscript/AGENTS.md`, then skim `MergeEngine.gs` and `Code.gs` to see the real sync/audit logic (stage ③).
+3. Read `ZONE_PIPELINE_SPEC.md`, then skim `reference-tools/data-pull-extension/background.js` and `.../zone-export-apps-script/Code.gs` to see the zone-assignment + generation logic (stages ① and ②).
+4. Read `WEB_APP_MIGRATION_SPEC.md` for product intent.
+5. Confirm with the owner which items in Section 9 are already done (service account? sheets shared? Mapbox token? Render account?).
+6. Start Phase 0. Do not skip the "Done when" gates. Do not write to a real sheet before Phase 3.
 
 ---
 

@@ -1,0 +1,44 @@
+{
+  "manifest_version": 3,
+  "name": "Spreadsheet Data Pull (NC Custom Fields)",
+  "version": "1.0.1",
+  "description": "Shows a 'Do a data pull' button on a specific Google Sheet, fetches Mapbox zones, joins by lat/lon, and writes results to a new sheet tab with a progress bar.",
+  "permissions": [
+    "storage",
+    "identity",
+    "scripting",
+    "activeTab"
+  ],
+  "host_permissions": [
+    "https://docs.google.com/*",
+    "https://sheets.googleapis.com/*",
+    "https://accounts.google.com/*",
+    "https://oauth2.googleapis.com/*",
+    "https://api.mapbox.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://docs.google.com/spreadsheets/d/*"
+      ],
+      "js": [
+        "config.js",
+        "content.js"
+      ],
+      "css": [
+        "styles.css"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "icons": {
+    "128": "icons/icon128.png"
+  },
+  "action": {
+    "default_title": "Spreadsheet Data Pull (NC Custom Fields)"
+  }
+}

@@ -17,6 +17,7 @@ import registerRunRoutes from './routes/runs.routes';
 import registerAuditRoutes from './routes/audit.routes';
 import registerPreviewRoutes from './routes/preview.routes';
 import registerDictionaryRoutes from './routes/dictionary.routes';
+import registerZoneRoutes from './routes/zones.routes';
 
 export function createApp(): Express {
   db.init();
@@ -41,6 +42,7 @@ export function createApp(): Express {
   registerAuditRoutes(api, deps);
   registerPreviewRoutes(api, deps);
   registerDictionaryRoutes(api, deps);
+  registerZoneRoutes(api, deps);
   app.use('/api', api);
 
   // Static frontend. Prefer the built React app (app/web/dist); fall back to the

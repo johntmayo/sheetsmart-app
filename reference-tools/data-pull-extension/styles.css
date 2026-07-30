@@ -1,0 +1,47 @@
+
+#data-pull-container {
+  position: fixed;
+  right: 24px;
+  bottom: 24px;
+  z-index: 999999;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  align-items: flex-end;
+  font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+}
+#data-pull-btn {
+  all: unset;
+  background: #1a73e8;
+  color: white;
+  padding: 14px 18px;
+  border-radius: 999px;
+  font-weight: 600;
+  box-shadow: 0 6px 18px rgba(0,0,0,0.2);
+  cursor: pointer;
+}
+#data-pull-btn:hover { filter: brightness(1.05); }
+#data-pull-btn:active { transform: translateY(1px); }
+#data-pull-btn:disabled { opacity: 0.6; cursor: not-allowed; }
+#data-pull-progress {
+  background: rgba(0,0,0,0.75);
+  color: white;
+  padding: 10px 12px;
+  border-radius: 10px;
+  min-width: 260px;
+}
+#data-pull-progress .bar {
+  width: 100%;
+  height: 8px;
+  background: rgba(255,255,255,0.2);
+  border-radius: 4px;
+  overflow: hidden;
+  margin-bottom: 6px;
+}
+#data-pull-progress .fill {
+  height: 100%;
+  width: 0%;
+  background: #4caf50;
+  transition: width 0.2s ease;
+}
+#data-pull-progress .label { font-size: 12px; opacity: 0.95; }

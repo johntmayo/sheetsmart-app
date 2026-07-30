@@ -1,7 +1,7 @@
 // Google integration (handoff Section 4). Authenticates a dedicated service
 // account, caches the clients, wraps every call in retry-with-backoff, and
-// provides the A1/column helpers used across the app. Writing is intentionally
-// NOT exposed yet — Phase 0/1 are read-only.
+// provides the A1/column helpers used across the app. All Sheets API calls,
+// including Phase-C writes, stay behind this module.
 
 import { google, sheets_v4, drive_v3 } from 'googleapis';
 import { config } from './config';
@@ -223,6 +223,75 @@ export async function readHeaders(spreadsheetId: string, tabName?: string): Prom
   const rows = await readValues(spreadsheetId, range);
   const header = rows[0] || [];
   return header.map((h: unknown) => String(h == null ? '' : h).trim());
+}
+
+// ---- Write helpers (Phase C) ----
+// These are deliberately small transport wrappers. Safety decisions, snapshots,
+// approval checks, and durable logging belong to the execution engine.
+
+export interface ValueRangeUpdate {
+  range: string;
+  values: unknown[][];
+}
+
+export interface AppendValuesResult {
+  updatedRange: string;
+  updatedRows: number;
+}
+
+/** Update several A1 ranges in one Sheets API request. */
+export async function updateValues(spreadsheetId: string, updates: ValueRangeUpdate[]): Promise<number> {
+  if (updates.length === 0) return 0;
+  const { sheets } = getClients();
+  const res = await withRetry(() =>
+    sheets.spreadsheets.values.batchUpdate({
+      spreadsheetId,
+      requestBody: {
+        valueInputOption: 'RAW',
+        data: updates.map((update) => ({ range: update.range, values: update.values })),
+      },
+    })
+  );
+  return res.data.totalUpdatedCells ?? 0;
+}
+
+/** Append whole rows to a tab without interpreting user-entered values. */
+export async function appendValues(
+  spreadsheetId: string,
+  range: string,
+  rows: unknown[][]
+): Promise<AppendValuesResult> {
+  if (rows.length === 0) return { updatedRange: '', updatedRows: 0 };
+  const { sheets } = getClients();
+  const res = await withRetry(() =>
+    sheets.spreadsheets.values.append({
+      spreadsheetId,
+      range,
+      valueInputOption: 'RAW',
+      insertDataOption: 'INSERT_ROWS',
+      requestBody: { values: rows },
+    })
+  );
+  return {
+    updatedRange: res.data.updates?.updatedRange ?? '',
+    updatedRows: res.data.updates?.updatedRows ?? 0,
+  };
+}
+
+/** Apply structural requests such as deleting rows. */
+export async function batchUpdateSpreadsheet(
+  spreadsheetId: string,
+  requests: sheets_v4.Schema$Request[]
+): Promise<sheets_v4.Schema$Response[]> {
+  if (requests.length === 0) return [];
+  const { sheets } = getClients();
+  const res = await withRetry(() =>
+    sheets.spreadsheets.batchUpdate({
+      spreadsheetId,
+      requestBody: { requests },
+    })
+  );
+  return res.data.replies ?? [];
 }
 
 export { SCOPES };

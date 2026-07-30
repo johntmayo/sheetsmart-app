@@ -29,6 +29,12 @@ export const config = {
   // reports "Not connected" until the owner supplies it.
   googleServiceAccountJsonB64: process.env.GOOGLE_SERVICE_ACCOUNT_JSON_B64 || '',
 
+  // Mapbox token used ONLY to read the zone-polygon dataset (Workflow A, the
+  // read-only Zone Health check — ZONE_PIPELINE_SPEC.md §5.2/§6). The token is a
+  // secret and lives here in env, never in the database. The (non-secret)
+  // username + dataset id live in app_settings so they are editable in the UI.
+  mapboxToken: process.env.MAPBOX_TOKEN || '',
+
   isProduction: (process.env.NODE_ENV || '').toLowerCase() === 'production',
   // Allow disabling the login gate ONLY for local development convenience.
   disableAuth: bool(process.env.DISABLE_AUTH, false),

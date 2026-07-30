@@ -1,0 +1,220 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      body { font-family: Arial, sans-serif; margin: 12px; }
+      .row { margin-bottom: 10px; }
+      .zones {
+        border: 1px solid #ddd;
+        border-radius: 6px;
+        padding: 8px;
+        max-height: 260px;
+        overflow: auto;
+      }
+      .zone-item { display: block; margin-bottom: 6px; }
+      button {
+        border: none;
+        background: #1a73e8;
+        color: white;
+        padding: 8px 12px;
+        border-radius: 4px;
+        cursor: pointer;
+      }
+      button:disabled { opacity: 0.6; cursor: default; }
+      .muted { color: #666; font-size: 12px; }
+      .result {
+        margin-top: 10px;
+        border-top: 1px solid #eee;
+        padding-top: 10px;
+      }
+      .ok { color: #0b8043; }
+      .err { color: #d93025; }
+      a { color: #1a73e8; }
+    </style>
+  </head>
+  <body>
+    <div class="row">
+      <strong>Zone Export Tool</strong>
+      <div class="muted">Creates one new spreadsheet per selected zone.</div>
+    </div>
+
+    <div class="row">
+      <label for="sheet-select"><strong>Source tab</strong></label><br />
+      <select id="sheet-select"></select>
+      <div class="muted">Pick the data-pull output tab to export from.</div>
+    </div>
+
+    <div class="row">
+      <label><input type="checkbox" id="select-all" /> Select all zones</label>
+    </div>
+
+    <div id="zones" class="zones">
+      Loading zones...
+    </div>
+
+    <div class="row">
+      <button id="run-btn" disabled>Export Selected Zones</button>
+    </div>
+
+    <div id="status" class="muted"></div>
+    <div id="results" class="result"></div>
+
+    <script>
+      const zonesEl = document.getElementById('zones');
+      const sheetSelectEl = document.getElementById('sheet-select');
+      const selectAllEl = document.getElementById('select-all');
+      const runBtn = document.getElementById('run-btn');
+      const statusEl = document.getElementById('status');
+      const resultsEl = document.getElementById('results');
+
+      function setStatus(text) {
+        statusEl.textContent = text || '';
+      }
+
+      function getSelectedZones() {
+        return Array.from(document.querySelectorAll('.zone-checkbox:checked'))
+          .map((el) => el.value);
+      }
+
+      function refreshRunState() {
+        runBtn.disabled = getSelectedZones().length === 0;
+      }
+
+      function renderZones(zones) {
+        selectAllEl.checked = false;
+        if (!zones.length) {
+          zonesEl.textContent = 'No zones found.';
+          runBtn.disabled = true;
+          return;
+        }
+        zonesEl.innerHTML = zones.map((zone) => {
+          const escaped = zone.replace(/"/g, '&quot;');
+          return '<label class="zone-item">' +
+            '<input class="zone-checkbox" type="checkbox" value="' + escaped + '" /> ' +
+            escaped +
+            '</label>';
+        }).join('');
+
+        document.querySelectorAll('.zone-checkbox').forEach((cb) => {
+          cb.addEventListener('change', refreshRunState);
+        });
+        refreshRunState();
+      }
+
+      function renderResults(payload) {
+        if (!payload || !payload.results) {
+          resultsEl.innerHTML = '';
+          return;
+        }
+        const lines = payload.results.map((item) => {
+          if (!item.ok) {
+            return '<div class="err">[' + item.zone + '] ' + item.message + '</div>';
+          }
+          return '<div class="ok">[' + item.zone + '] ' +
+            item.rowCount + ' rows exported - ' +
+            '<a target="_blank" href="' + item.spreadsheetUrl + '">Open sheet</a></div>';
+        });
+        resultsEl.innerHTML = lines.join('');
+      }
+
+      function getSelectedSheetName() {
+        return sheetSelectEl.value || '';
+      }
+
+      function loadZonesForSelectedSheet() {
+        const sheetName = getSelectedSheetName();
+        if (!sheetName) {
+          zonesEl.textContent = 'Select a source tab.';
+          runBtn.disabled = true;
+          return;
+        }
+        setStatus('Loading zones...');
+        zonesEl.textContent = 'Loading zones...';
+        google.script.run
+          .withSuccessHandler((zones) => {
+            setStatus('');
+            renderZones(zones || []);
+          })
+          .withFailureHandler((err) => {
+            setStatus('Failed to load zones: ' + (err && err.message ? err.message : err));
+            zonesEl.textContent = 'Unable to load zones.';
+            runBtn.disabled = true;
+          })
+          .getZoneOptions(sheetName);
+      }
+
+      function loadSidebarContext() {
+        setStatus('Loading tabs...');
+        google.script.run
+          .withSuccessHandler((ctx) => {
+            const sheetNames = (ctx && ctx.sheetNames) ? ctx.sheetNames : [];
+            const activeName = (ctx && ctx.activeSheetName) ? ctx.activeSheetName : '';
+            if (!sheetNames.length) {
+              setStatus('No tabs found.');
+              zonesEl.textContent = 'No tabs found.';
+              runBtn.disabled = true;
+              return;
+            }
+            sheetSelectEl.innerHTML = sheetNames.map((name) => {
+              const selected = name === activeName ? ' selected' : '';
+              const escaped = escapeHtml(name);
+              return '<option value="' + escaped + '"' + selected + '>' + escaped + '</option>';
+            }).join('');
+            setStatus('');
+            loadZonesForSelectedSheet();
+          })
+          .withFailureHandler((err) => {
+            setStatus('Failed to load tabs: ' + (err && err.message ? err.message : err));
+            zonesEl.textContent = 'Unable to load tabs.';
+            runBtn.disabled = true;
+          })
+          .getSidebarContext();
+      }
+
+      function escapeHtml(text) {
+        return (text || '')
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;')
+          .replace(/'/g, '&#39;');
+      }
+
+      selectAllEl.addEventListener('change', () => {
+        document.querySelectorAll('.zone-checkbox').forEach((cb) => {
+          cb.checked = selectAllEl.checked;
+        });
+        refreshRunState();
+      });
+      sheetSelectEl.addEventListener('change', () => {
+        resultsEl.innerHTML = '';
+        loadZonesForSelectedSheet();
+      });
+
+      runBtn.addEventListener('click', () => {
+        const zones = getSelectedZones();
+        const sheetName = getSelectedSheetName();
+        if (!zones.length) return;
+        if (!sheetName) return;
+        runBtn.disabled = true;
+        setStatus('Exporting ' + zones.length + ' zone(s)...');
+        resultsEl.innerHTML = '';
+
+        google.script.run
+          .withSuccessHandler((payload) => {
+            setStatus('Done.');
+            renderResults(payload);
+            runBtn.disabled = false;
+          })
+          .withFailureHandler((err) => {
+            setStatus('Export failed: ' + (err && err.message ? err.message : err));
+            runBtn.disabled = false;
+          })
+          .exportZones({ sheetName, zones });
+      });
+
+      loadSidebarContext();
+    </script>
+  </body>
+  </html>

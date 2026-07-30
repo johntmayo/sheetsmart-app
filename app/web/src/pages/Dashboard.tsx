@@ -9,6 +9,11 @@ import type {
   SheetAudit,
   SheetStatus,
   StatusResponse,
+  ZoneCheckResponse,
+  ZoneLatestResponse,
+  ZoneOutcome,
+  ZoneReconcileReport,
+  ZoneSourceStatus,
 } from '../lib/types';
 import { EmptyState, ErrorState, SectionHead, Spinner, StatusPill } from '../components/ui';
 
@@ -153,6 +158,208 @@ export function Dashboard() {
             body="Run a check to see column drift, duplicate resident IDs, missing/extra rows by zone, and data completeness across every captain sheet."
           />
         )
+      )}
+
+      <ZoneHealth googleConfigured={google.configured} hasMaster={conn.master.length > 0} />
+    </>
+  );
+}
+
+// ---- Zone Health (Workflow A): read-only zone reconciliation ----
+
+const ZONE_OUTCOME_META: Record<ZoneOutcome, { label: string; kind: string }> = {
+  fill: { label: 'Would fill', kind: 'ok' },
+  match: { label: 'Correct', kind: 'ok' },
+  conflict: { label: 'Would change zone', kind: 'urgent' },
+  unassigned: { label: 'In no zone', kind: 'warn' },
+  missing_coords: { label: 'Missing coordinates', kind: 'neutral' },
+};
+
+function ZoneHealth({ googleConfigured, hasMaster }: { googleConfigured: boolean; hasMaster: boolean }) {
+  const [source, setSource] = useState<ZoneSourceStatus | null>(null);
+  const [report, setReport] = useState<ZoneReconcileReport | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [running, setRunning] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    Promise.all([
+      api.get<ZoneSourceStatus>('/zones/source').catch(() => null),
+      api.get<ZoneLatestResponse>('/zones/latest').catch(() => null),
+    ])
+      .then(([src, latest]) => {
+        if (!alive) return;
+        if (src) setSource(src);
+        if (latest?.report) setReport(latest.report);
+      })
+      .finally(() => {
+        if (alive) setLoading(false);
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  const runCheck = useCallback(async () => {
+    setRunning(true);
+    setError(null);
+    try {
+      const r = await api.post<ZoneCheckResponse>('/zones/check');
+      setReport(r.report);
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : String(e));
+    } finally {
+      setRunning(false);
+    }
+  }, []);
+
+  const tokenConfigured = source?.tokenConfigured ?? false;
+  const canCheck = googleConfigured && hasMaster && tokenConfigured;
+
+  return (
+    <>
+      <SectionHead title="Zones & captains">
+        <div className="card-meta" style={{ marginRight: 12 }}>
+          {report ? `Last checked ${fmtWhen(report.generatedAt)}` : 'Not checked yet'}
+        </div>
+        <button className="btn" onClick={runCheck} disabled={!canCheck || running}>
+          {running ? 'Checking…' : report ? 'Re-check zones' : 'Check zones'}
+        </button>
+      </SectionHead>
+
+      <p className="reading-copy" style={{ marginTop: 0 }}>
+        Compares each resident&apos;s latitude/longitude against your {source?.username ? '' : 'Mapbox '}zone shapes to see
+        who&apos;s in the wrong zone, who&apos;s unzoned, and whose captain (NC) contact info is stale.{' '}
+        <strong>This is a read-only check — nothing is written to any sheet.</strong>
+      </p>
+
+      {!loading && !tokenConfigured && (
+        <div className="callout" style={{ marginTop: 0 }}>
+          <strong>Mapbox isn&apos;t connected yet.</strong> Add a <span className="mono">MAPBOX_TOKEN</span> (a token with
+          the <span className="mono">datasets:read</span> scope) to <span className="mono">.env</span> and restart. The
+          zone dataset is <span className="mono">{source?.username ?? 'altagether'}</span> /{' '}
+          <span className="mono">{source?.datasetId ?? ''}</span>.
+        </div>
+      )}
+      {!loading && tokenConfigured && !hasMaster && (
+        <p className="reading-copy" style={{ marginTop: 0 }}>
+          Add a <strong>master</strong> connection under Sources to check zones.
+        </p>
+      )}
+
+      {error && <ErrorState message={error} />}
+      {report?.configError && <ErrorState message={report.configError} />}
+
+      {loading ? (
+        <Spinner />
+      ) : running && !report ? (
+        <div className="reading-copy">Reading the master and fetching your zone shapes…</div>
+      ) : report && !report.configError ? (
+        <ZoneView report={report} />
+      ) : (
+        canCheck &&
+        !report && (
+          <EmptyState
+            title="No zone check yet"
+            body="Run a check to see how many residents would change zones, sit in no zone, are missing coordinates, or have captain contact info that needs updating."
+          />
+        )
+      )}
+    </>
+  );
+}
+
+function ZoneView({ report }: { report: ZoneReconcileReport }) {
+  const s = report.summary;
+  const unresolved = report.resolution.filter((r) => !r.matched).map((r) => r.field);
+  return (
+    <>
+      <div className="card-grid" style={{ marginTop: 16 }}>
+        <Metric value={s.wouldChangeZone} label="Would change zone" alert={s.wouldChangeZone > 0} />
+        <Metric value={s.wouldFillZone} label="Unzoned → would get a zone" alert={s.wouldFillZone > 0} />
+        <Metric value={s.unassigned} label="In no zone (valid coords)" alert={s.unassigned > 0} />
+        <Metric value={s.missingCoords} label="Missing coordinates" alert={s.missingCoords > 0} />
+      </div>
+      <div className="card-grid" style={{ marginTop: 16 }}>
+        <Metric value={s.contactUpdates} label="Captain contact updates" alert={s.contactUpdates > 0} />
+        <Metric value={s.matched} label="Already correct" />
+        <Metric value={s.multiZone} label="In more than one zone" alert={s.multiZone > 0} />
+        <Metric value={s.featuresLoaded} label="Zone shapes loaded" />
+      </div>
+
+      {unresolved.length > 0 && (
+        <p className="reading-copy">
+          <strong>Heads up:</strong> couldn&apos;t locate these master column(s): {unresolved.join(', ')}. Add an alias in
+          the Field Dictionary so the check can find them.
+        </p>
+      )}
+
+      <ZoneDetailTable report={report} />
+    </>
+  );
+}
+
+function ZoneDetailTable({ report }: { report: ZoneReconcileReport }) {
+  const [open, setOpen] = useState(false);
+  if (report.rows.length === 0) {
+    return (
+      <p className="reading-copy">
+        Everything lines up — every resident with coordinates is in the right zone with current captain info.
+      </p>
+    );
+  }
+  return (
+    <>
+      <div className="section-head" style={{ marginTop: 24 }}>
+        <h2>What a zone refresh would change</h2>
+        <div className="spacer" />
+        <span className="pill warn">{report.rows.length.toLocaleString()}</span>
+        <button className="btn secondary small" style={{ marginLeft: 12 }} onClick={() => setOpen((o) => !o)}>
+          {open ? 'Hide' : 'Show'}
+        </button>
+      </div>
+      {open && (
+        <div className="table-wrap">
+          <table className="data">
+            <thead>
+              <tr>
+                <th>What</th>
+                <th>resident_id</th>
+                <th>Resident Name</th>
+                <th className="num">Row</th>
+                <th>Current zone</th>
+                <th>Computed zone</th>
+                <th>Captain contact changes</th>
+              </tr>
+            </thead>
+            <tbody>
+              {report.rows.map((r, i) => {
+                const meta = ZONE_OUTCOME_META[r.outcome];
+                return (
+                  <tr key={`${r.residentId}-${r.masterRow}-${i}`}>
+                    <td>
+                      <span className={`pill ${meta.kind}`}>{meta.label}</span>
+                      {r.multiZone && <span className="pill warn" style={{ marginLeft: 6 }}>Overlap</span>}
+                    </td>
+                    <td className="mono">{r.residentId || '—'}</td>
+                    <td>{r.residentName || '—'}</td>
+                    <td className="num">{r.masterRow}</td>
+                    <td>{r.currentZone || '—'}</td>
+                    <td>{r.computedZone || '—'}</td>
+                    <td className="truncate">
+                      {r.contactChanges.length === 0
+                        ? '—'
+                        : r.contactChanges
+                            .map((c) => `${c.field}: ${c.from || '(blank)'} → ${c.to}`)
+                            .join('; ')}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
       )}
     </>
   );

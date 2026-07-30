@@ -90,6 +90,28 @@ CREATE TABLE IF NOT EXISTS run_log_entries (
 CREATE INDEX IF NOT EXISTS idx_log_run ON run_log_entries(run_id);
 CREATE INDEX IF NOT EXISTS idx_log_type ON run_log_entries(run_id, type);
 
+-- Exact pre-write state for Phase-C undo. Snapshots are keyed by resident
+-- identity as well as their original A1 range so revert can re-find a row even
+-- after people insert, sort, or edit rows in Google Sheets.
+CREATE TABLE IF NOT EXISTS run_snapshots (
+  id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id             INTEGER NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+  spreadsheet_id     TEXT NOT NULL,
+  spreadsheet_name   TEXT DEFAULT '',
+  tab_name            TEXT NOT NULL,
+  operation           TEXT NOT NULL CHECK (operation IN ('cell_update','row_append','row_delete')),
+  resident_id         TEXT NOT NULL,
+  range_a1            TEXT DEFAULT '',
+  before_json         TEXT NOT NULL DEFAULT 'null',
+  after_json          TEXT NOT NULL DEFAULT 'null',
+  metadata_json       TEXT NOT NULL DEFAULT '{}',
+  reverted_by_run_id  INTEGER REFERENCES runs(id) ON DELETE SET NULL,
+  created_at          TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_snapshot_run ON run_snapshots(run_id);
+CREATE INDEX IF NOT EXISTS idx_snapshot_identity
+  ON run_snapshots(spreadsheet_id, tab_name, resident_id);
+
 CREATE TABLE IF NOT EXISTS conflicts (
   id               INTEGER PRIMARY KEY AUTOINCREMENT,
   run_id           INTEGER NOT NULL REFERENCES runs(id) ON DELETE CASCADE,

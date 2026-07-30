@@ -258,3 +258,75 @@ export interface PreviewResponse {
   unmatchedFields?: string[];
   sheets: (CellFillSheet | PushMissingSheet)[];
 }
+
+// ---- Zone Health (Workflow A) — mirrors src/lib/zoneEngine.ts ----
+
+export type ZoneOutcome = 'match' | 'fill' | 'conflict' | 'unassigned' | 'missing_coords';
+
+export interface ZoneFieldChange {
+  field: string;
+  from: string;
+  to: string;
+}
+
+export interface ZoneReconcileRow {
+  residentId: string;
+  residentName: string;
+  masterRow: number;
+  outcome: ZoneOutcome;
+  currentZone: string;
+  computedZone: string;
+  multiZone: boolean;
+  contactChanges: ZoneFieldChange[];
+}
+
+export interface ZoneReconcileSummary {
+  featuresLoaded: number;
+  totalResidentRows: number;
+  withCoordinates: number;
+  missingCoords: number;
+  unassigned: number;
+  matched: number;
+  wouldFillZone: number;
+  wouldChangeZone: number;
+  contactUpdates: number;
+  multiZone: number;
+  distinctZonesInMaster: number;
+  distinctZonesComputed: number;
+}
+
+export interface ZoneResolvedHeader {
+  field: string;
+  header: string | null;
+  matched: boolean;
+}
+
+export interface ZoneReconcileReport {
+  generatedAt: string;
+  summary: ZoneReconcileSummary;
+  resolution: ZoneResolvedHeader[];
+  configError: string;
+  rows: ZoneReconcileRow[];
+}
+
+export interface ZoneSource {
+  username: string;
+  datasetId: string;
+}
+
+export interface ZoneSourceStatus extends ZoneSource {
+  tokenConfigured: boolean;
+  usingDefaults: boolean;
+}
+
+export interface ZoneLatestResponse {
+  report: ZoneReconcileReport | null;
+  runId: number | null;
+  source: ZoneSource | null;
+}
+
+export interface ZoneCheckResponse {
+  runId: number;
+  source: ZoneSource;
+  report: ZoneReconcileReport;
+}

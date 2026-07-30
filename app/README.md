@@ -1,6 +1,6 @@
 # SheetSmart (web app)
 
-A standalone admin tool that keeps ~55 Google "captain" spreadsheets aligned
+A standalone admin tool that keeps **120** Google "captain" spreadsheets aligned
 with one **master** resident dataset. It audits sheets for drift, moves data
 between them safely (fill blanks, append missing rows, log conflicts instead of
 overwriting), and manages columns — always with a **dry run** before any live
@@ -159,7 +159,7 @@ Section 9 of the handoff.)
 7. Open the **master** spreadsheet → **Share** → paste the bot's email
    (`sheetsmart-bot@…gserviceaccount.com`, shown on the dashboard once connected)
    → give it **Editor** → Send.
-8. Open the Google Drive **folder** of ~55 captain sheets → **Share** → same
+8. Open the Google Drive **folder** of 120 captain sheets → **Share** → same
    email → **Editor** → Send.
 9. Do the same for the **sales tracker** / any external source spreadsheet.
 10. In SheetSmart → **Connections → Add connection**, create one entry each for

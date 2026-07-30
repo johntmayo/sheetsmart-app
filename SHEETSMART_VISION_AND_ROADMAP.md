@@ -10,7 +10,10 @@
 > read this doc first, then `SHEETSMART_BUILD_HANDOFF.md` (architecture + safety
 > model, still authoritative on *behavior*), then `app/README.md` (what is built
 > and how to run it). The legacy code in `legacy-appsscript/` remains the
-> behavioral source of truth for the underlying operations.
+> behavioral source of truth for the underlying sync/audit operations.
+> For the **upstream lifecycle** (assigning zones + generating the captain
+> sheets — new functionality, see §5.7), read `ZONE_PIPELINE_SPEC.md`; its
+> behavioral source of truth is the working code in `reference-tools/`.
 >
 > **Precedence:** this doc wins on *product vision, UX, and direction*. The
 > handoff still wins on the *safety model* and the *exact merge behavior*. When
@@ -217,6 +220,40 @@ this conflict," "what does this column mean?" Strictly optional, never in the
 write path, always over data the tool already computed. Flag as a later
 enhancement, not a core dependency.
 
+### 5.7 The upstream lifecycle: zone assignment & captain-sheet generation (new)
+Full design: **`ZONE_PIPELINE_SPEC.md`**. Working reference code:
+`reference-tools/`. Two capabilities that today live *outside* SheetSmart (a
+Chrome extension + a bound Apps Script + a manual sort-and-copy) should be
+absorbed, because they are the *upstream half of the same reconciliation
+mission* — and both slot cleanly into this vision rather than bolting on:
+
+- **Assign / reconcile zones + captain info (Workflow A).** For each resident,
+  use their `Latitude`/`Longitude` and ~120 Mapbox zone polygons
+  (point-in-polygon) to set `ZoneName`, `NC Name`, `NC Phone`, `NC Email`.
+  Crucially, **all six of these are already canonical fields** (master schema /
+  Field Dictionary, Appendix A) — so this is not a new import, it's
+  **reconciliation of derived fields**: an ambient **Health** check ("N
+  residents unzoned; M would change zone; K missing coordinates") and an
+  approval-gated **Playbook**, written through the same `writeGuard` + snapshot/
+  undo path as everything else. The geometry is deterministic pure code that
+  ports almost verbatim into a tested `lib/zoneEngine.ts` — the lowest-risk new
+  code in the project.
+- **Generate / publish captain sheets by zone (Workflow B).** Create one
+  spreadsheet per zone from the zone-current master, preserving dropdowns/
+  checkboxes, into the captain folder. This is the **first concrete form of
+  "publish a projection outward"** — the exact motion the system-of-record
+  trajectory needs (§9.5.3). It is higher-risk (bulk Drive file creation,
+  elevated Drive scope, a file-ownership decision) and **feeds the live Zone
+  Dashboard**, so it is gated like the destructive schema ops.
+
+*Reconciliation, not a one-off import:* zoning is something the backbone should
+**watch and keep true continuously** (drift when zones are redrawn or residents
+are added), surfacing proposed corrections for approval — squarely the §9.5
+model. See `ZONE_PIPELINE_SPEC.md` for the write policy (recompute-with-approval
+vs. fill-blank), the auth/ownership gotcha, and the open questions (notably:
+captain contact currently lives in Mapbox properties and probably wants to
+become a first-class "zone roster" the tool owns).
+
 ---
 
 ## 6. Architecture direction & the big decisions
@@ -280,26 +317,42 @@ used first.
   by zone, completeness — matching legacy `Code.gs` counting rules) and the
   **Preview** experience for the core sync playbooks, with plain-language impact
   summaries. **Build the parity harness** (diff against legacy output on frozen
-  copies). *Done when:* the Operator can see alignment at a glance and preview
-  the sales-loop playbooks, matching legacy output. Still zero writes.
+  copies). *Zone pipeline (§5.7):* also build the pure, tested `lib/zoneEngine.ts`
+  (point-in-polygon, ported from `reference-tools/.../background.js`) and a
+  **read-only zone reconciliation check** — "N residents unzoned, M would change
+  zone, K missing coordinates" — surfaced in Health and diffed against the
+  extension's output in the parity harness. *Done when:* the Operator can see
+  alignment at a glance and preview the sales-loop playbooks, matching legacy
+  output. Still zero writes.
 
 - **Phase C — Safe execution + Undo.** Turn on live runs for the daily/weekly
   playbooks (import→master, push→folder, push-missing→folder, pull-data←folder),
   all through the write-guard, each with **pre-write snapshots and one-click
-  revert** (§5.3). Build the **Conflict Inbox** (review-first). *Done when:* the
-  Operator can run the core loop live on **copies**, see exactly what changed,
-  revert a run, and triage conflicts — then graduate to real sheets.
+  revert** (§5.3). Build the **Conflict Inbox** (review-first). *Zone pipeline
+  (§5.7):* enable the live, approval-gated, snapshotted **"Refresh zones &
+  captains" playbook (Workflow A)** — it reconciles the master's canonical
+  `ZoneName`/`NC …` fields through the same write-guard path (recompute-with-
+  approval by default; fill-blank mode available). *Done when:* the Operator can
+  run the core loop live on **copies**, see exactly what changed, revert a run,
+  and triage conflicts — then graduate to real sheets.
 
 - **Phase D — Schema playbooks (destructive, last).** Rename / delete columns
   across one or many sheets, with hard confirmation and accurate impact counts,
-  fully integrated with the Field Dictionary. *Done when:* nothing destructive
-  happens without an accurate preview + explicit confirm, and it's all logged
-  and revertible where feasible.
+  fully integrated with the Field Dictionary. *Zone pipeline (§5.7):* build
+  **"Generate captain sheets" (Workflow B)** here or as its own gated phase — it
+  is the first "publish a projection outward" (§9.5.3) and carries schema-op-
+  level risk (bulk Drive file creation, elevated Drive write scope, a file-
+  ownership decision, and it feeds the live Zone Dashboard). Same bar: accurate
+  dry-run preview, explicit confirm, never regenerate an existing sheet silently.
+  *Done when:* nothing destructive happens without an accurate preview + explicit
+  confirm, and it's all logged and revertible where feasible.
 
 - **Phase E — Polish & optional modern extras.** Scheduling + summary emails
-  (if wanted), the optional Explain-it assistant, captain-facing read-only views
-  or notifications (if the open questions resolve that way), accessibility and
-  mobile pass, and retiring the legacy Apps Script.
+  (if wanted) — including **scheduled zone reconciliation** so re-zoning after
+  Mapbox edits is proposed automatically (§5.7) — the optional Explain-it
+  assistant, captain-facing read-only views or notifications (if the open
+  questions resolve that way), accessibility and mobile pass, and retiring the
+  legacy Apps Script.
 
 ---
 
@@ -412,7 +465,10 @@ this locks in:
    - *Stage 3 — System of record:* the DB is canonical; sheets are projections
      the Zone Dashboard and captains consume. Only pursue once Stage 1–2 earn it.
    Keep `db.js` and a clean domain model so this evolution stays open (it also
-   makes the eventual SQLite→Postgres move painless).
+   makes the eventual SQLite→Postgres move painless). *Concretely, the
+   captain-sheet generation capability (Workflow B, §5.7 / `ZONE_PIPELINE_SPEC.md`)
+   is the first real "publish a projection outward" mechanism — build its writer
+   with the Stage 2/3 publishing model in mind, not as a one-off export.*
 
 4. **Conflict handling = approval-based resolution (Q3).** Not just log-and-
    dismiss. The Conflict Inbox lets the Operator **approve a resolution** ("keep

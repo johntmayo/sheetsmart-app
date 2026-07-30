@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert';
-import { decideWrite, normalizePolicy } from '../src/lib/writeGuard';
+import { decideAppendCell, decideWrite, normalizePolicy } from '../src/lib/writeGuard';
 
 test('normalizePolicy maps synonyms to canonical labels', () => {
   assert.strictEqual(normalizePolicy('Fill Blank'), 'fill_blank');
@@ -50,6 +50,16 @@ test('resident_id is always protected regardless of policy (rule 5)', () => {
   const d = decideWrite({ column: 'resident_id', target: '', source: 'R-999', policy: 'overwrite' });
   assert.strictEqual(d.willWrite, false);
   assert.strictEqual(d.effectivePolicy, 'never');
+});
+
+test('a new row may be created with resident_id, but a blank identity is rejected', () => {
+  const identity = decideAppendCell({ column: 'resident_id', source: 'R-999' });
+  assert.strictEqual(identity.action, 'fill');
+  assert.strictEqual(identity.willWrite, true);
+
+  const blankIdentity = decideAppendCell({ column: 'resident_id', source: '' });
+  assert.strictEqual(blankIdentity.action, 'skip');
+  assert.strictEqual(blankIdentity.willWrite, false);
 });
 
 test('unlisted columns default to conflict-only', () => {
