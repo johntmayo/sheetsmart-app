@@ -14,6 +14,7 @@
 // `reference-tools/data-pull-extension/background.js` — it is plain,
 // browser-independent JavaScript and is the behavioral source of truth.
 
+import { createHash } from 'node:crypto';
 import type { CellValue } from './values';
 import { normalizeKey } from './columns';
 
@@ -149,9 +150,11 @@ export function findContainingFeatures(index: IndexedZone[], pt: Position): Zone
 
 // ------- The zone → canonical-field mapping (from background.js OUTPUT_FIELDS) -------
 
-// Each derived master column and the Mapbox feature property it is computed
-// from. All four targets are canonical fields already in the master + Field
-// Dictionary, so this is reconciliation of derived fields, not a new import.
+// Derived output columns computed from Mapbox polygons. These are proposed
+// outputs — not required inputs. The historical raw "Master Data File" tab has
+// only the 48 base columns (no ZoneName / NC fields); the Data Pull App used to
+// write a separate "Zones Join …" tab. SheetSmart must enrich the raw master
+// itself: lat/lon + polygons → these four fields → approval-gated write later.
 export interface ZoneOutputFieldSpec {
   key: 'zone' | 'ncName' | 'ncPhone' | 'ncEmail';
   canonical: string; // canonical master field label
@@ -164,6 +167,13 @@ export const ZONE_OUTPUT_FIELDS: ZoneOutputFieldSpec[] = [
   { key: 'ncPhone', canonical: 'NC Phone', property: 'ContactPhone' },
   { key: 'ncEmail', canonical: 'NC Email', property: 'ContactEmail' },
 ];
+
+export const ZONE_OUTPUT_CANONICALS = ZONE_OUTPUT_FIELDS.map((spec) => spec.canonical);
+
+// When enriching a raw master, every matched resident becomes a "fill". Cap the
+// detail list so Health stays readable and the stored report stays small; the
+// summary counts remain exact.
+export const ZONE_DETAIL_ROW_LIMIT = 250;
 
 // ------- Reconciliation -------
 
@@ -188,10 +198,25 @@ export type ZoneOutcome =
   | 'unassigned' // valid coordinates but inside no polygon
   | 'missing_coords'; // blank/invalid latitude or longitude
 
+const OUTCOME_DETAIL_PRIORITY: Record<ZoneOutcome, number> = {
+  conflict: 0,
+  fill: 1,
+  match: 2,
+  missing_coords: 3,
+  unassigned: 4,
+};
+
 export interface FieldChange {
   field: string; // canonical field label
   from: string;
   to: string;
+}
+
+export interface DerivedFieldPreview {
+  field: string;
+  current: string;
+  computed: string;
+  columnExists: boolean;
 }
 
 export interface ZoneReconcileRow {
@@ -203,6 +228,7 @@ export interface ZoneReconcileRow {
   computedZone: string;
   multiZone: boolean; // point fell inside more than one polygon
   contactChanges: FieldChange[]; // NC field diffs (blank->value or changed)
+  outputValues: DerivedFieldPreview[]; // all four raw/current -> computed derived values
 }
 
 export interface ZoneReconcileSummary {
@@ -218,6 +244,7 @@ export interface ZoneReconcileSummary {
   multiZone: number; // rows inside more than one polygon
   distinctZonesInMaster: number;
   distinctZonesComputed: number;
+  columnsToAdd: number;
 }
 
 export interface ResolvedHeaderInfo {
@@ -226,12 +253,223 @@ export interface ResolvedHeaderInfo {
   matched: boolean;
 }
 
+export interface ZoneWriteProposal {
+  residentId: string;
+  column: string;
+  value: string;
+  policy: 'fill_blank';
+}
+
 export interface ZoneReconcileReport {
   generatedAt: string;
   summary: ZoneReconcileSummary;
   resolution: ResolvedHeaderInfo[];
+  proposedColumns: string[]; // derived output columns absent from the input grid
+  enrichmentMode: boolean; // true when at least one derived output column must be added
+  detailTruncated: boolean; // true when rows is a prioritized sample of a larger set
+  detailTotal: number; // how many rows would have been surfaced without the cap
   configError: string; // non-empty when the reconciliation had to be skipped
   rows: ZoneReconcileRow[]; // per-resident detail (blank/unassigned/conflict/fill surfaced)
+  /** Present only when reconcileZones is asked to collect fill_blank write proposals. */
+  writeProposals?: ZoneWriteProposal[];
+}
+
+export interface ZoneEnrichmentPlan {
+  report: ZoneReconcileReport;
+  proposals: ZoneWriteProposal[];
+  columnsToAdd: string[];
+  fingerprint: string;
+  cellsToFill: number;
+  residentsTouched: number;
+}
+
+export interface ReconcileZonesOptions {
+  collectWriteProposals?: boolean;
+}
+
+export function fingerprintZoneProposals(proposals: ZoneWriteProposal[]): string {
+  const lines = proposals
+    .map((proposal) => `${proposal.residentId}\t${proposal.column}\t${proposal.value}`)
+    .sort();
+  return createHash('sha256').update(lines.join('\n')).digest('hex');
+}
+
+/** Build the approval-gated fill_blank enrichment plan (proposals + fingerprint). */
+export function planZoneEnrichment(
+  masterGrid: Grid,
+  features: ZoneFeatureCollection,
+  cfg: ZoneReconcileConfig
+): ZoneEnrichmentPlan {
+  const report = reconcileZones(masterGrid, features, cfg, { collectWriteProposals: true });
+  const proposals = report.writeProposals || [];
+  const residentsTouched = new Set(proposals.map((proposal) => proposal.residentId)).size;
+  return {
+    report,
+    proposals,
+    columnsToAdd: report.proposedColumns,
+    fingerprint: fingerprintZoneProposals(proposals),
+    cellsToFill: proposals.length,
+    residentsTouched,
+  };
+}
+
+export interface CaptainMoveCandidate {
+  residentId: string;
+  residentName: string;
+  fromZone: string;
+  toZone: string;
+  currentZoneOnSheet: string;
+  computedZone: string;
+  multiZone: boolean;
+}
+
+export interface CaptainMovePlan {
+  fromZone: string;
+  toZone: string;
+  candidates: CaptainMoveCandidate[];
+  skipped: Array<{ residentId: string; reason: string }>;
+  errors: string[];
+  fingerprint: string;
+}
+
+/**
+ * Propose identity-based moves of residents who currently sit on the source
+ * captain sheet but whose Mapbox-computed zone matches the destination sheet's
+ * zone. Pure: no I/O. Destination/source zone strings come from the caller
+ * (detected mode of ZoneName, or an explicit override for empty test sheets).
+ */
+export function planCaptainSheetMoves(
+  fromGrid: Grid,
+  masterGrid: Grid,
+  features: ZoneFeatureCollection,
+  cfg: ZoneReconcileConfig,
+  fromZone: string,
+  toZone: string
+): CaptainMovePlan {
+  const plan: CaptainMovePlan = {
+    fromZone: fromZone.trim(),
+    toZone: toZone.trim(),
+    candidates: [],
+    skipped: [],
+    errors: [],
+    fingerprint: '',
+  };
+  if (!plan.fromZone) {
+    plan.errors.push('Source zone could not be determined. Set an explicit from-zone or add ZoneName values on the source copy.');
+    return plan;
+  }
+  if (!plan.toZone) {
+    plan.errors.push('Destination zone could not be determined. Set an explicit to-zone or add ZoneName values on the destination copy.');
+    return plan;
+  }
+  if (plan.fromZone === plan.toZone) {
+    plan.errors.push('Source and destination zones must be different.');
+    return plan;
+  }
+
+  const fromHeaders = (fromGrid[0] || []).map((h) => s(h));
+  const masterHeaders = (masterGrid[0] || []).map((h) => s(h));
+  const fromIdIdx = headerIndex(fromHeaders, cfg.identityHeader || 'resident_id');
+  const fromNameIdx = headerIndex(fromHeaders, cfg.nameHeader || 'Resident Name');
+  const fromZoneIdx = headerIndex(fromHeaders, 'ZoneName');
+  const fromLatIdx = headerIndex(fromHeaders, cfg.latHeader);
+  const fromLonIdx = headerIndex(fromHeaders, cfg.lonHeader);
+  const masterIdIdx = headerIndex(masterHeaders, cfg.identityHeader || 'resident_id');
+  const masterLatIdx = headerIndex(masterHeaders, cfg.latHeader);
+  const masterLonIdx = headerIndex(masterHeaders, cfg.lonHeader);
+  const masterNameIdx = headerIndex(masterHeaders, cfg.nameHeader || 'Resident Name');
+
+  if (fromIdIdx === -1) {
+    plan.errors.push('Source captain sheet has no resident_id column.');
+    return plan;
+  }
+  if (masterLatIdx === -1 || masterLonIdx === -1) {
+    if (fromLatIdx === -1 || fromLonIdx === -1) {
+      plan.errors.push('Latitude/Longitude columns could not be located on the master or source sheet.');
+      return plan;
+    }
+  }
+
+  const index = buildSpatialIndex(features);
+  if (index.length === 0) {
+    plan.errors.push('No zone polygons were loaded. Check the Mapbox zone source connection and token.');
+    return plan;
+  }
+
+  const masterById = new Map<string, CellValue[]>();
+  if (masterIdIdx !== -1) {
+    for (let i = 1; i < masterGrid.length; i++) {
+      const row = masterGrid[i] || [];
+      const id = s(row[masterIdIdx]);
+      if (!id || masterById.has(id)) continue;
+      masterById.set(id, row);
+    }
+  }
+
+  for (let i = 1; i < fromGrid.length; i++) {
+    const row = fromGrid[i] || [];
+    const residentId = s(row[fromIdIdx]);
+    if (!residentId) continue;
+
+    const currentZoneOnSheet = fromZoneIdx === -1 ? '' : s(row[fromZoneIdx]);
+    const masterRow = masterById.get(residentId);
+    const latSource = masterRow && masterLatIdx !== -1 ? masterRow[masterLatIdx] : row[fromLatIdx];
+    const lonSource = masterRow && masterLonIdx !== -1 ? masterRow[masterLonIdx] : row[fromLonIdx];
+    const lat = toNumber(latSource);
+    const lon = toNumber(lonSource);
+    const residentName =
+      (fromNameIdx !== -1 ? s(row[fromNameIdx]) : '') ||
+      (masterRow && masterNameIdx !== -1 ? s(masterRow[masterNameIdx]) : '');
+
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+      plan.skipped.push({ residentId, reason: 'Missing or invalid coordinates' });
+      continue;
+    }
+
+    const matches = findContainingFeatures(index, [lon, lat]);
+    if (matches.length === 0) {
+      plan.skipped.push({ residentId, reason: 'Point is not inside any zone polygon' });
+      continue;
+    }
+    if (matches.length > 1) {
+      plan.skipped.push({ residentId, reason: 'Point falls in more than one zone; left for manual review' });
+      continue;
+    }
+
+    const computedZone = featureProp(matches[0], 'ZoneName');
+    if (!computedZone) {
+      plan.skipped.push({ residentId, reason: 'Matched polygon has a blank ZoneName' });
+      continue;
+    }
+    if (computedZone !== plan.toZone) {
+      // Belongs on this sheet, another sheet, or nowhere we are moving to.
+      continue;
+    }
+
+    plan.candidates.push({
+      residentId,
+      residentName,
+      fromZone: plan.fromZone,
+      toZone: plan.toZone,
+      currentZoneOnSheet,
+      computedZone,
+      multiZone: false,
+    });
+  }
+
+  plan.fingerprint = fingerprintCaptainMoves(plan.candidates, plan.fromZone, plan.toZone);
+  return plan;
+}
+
+export function fingerprintCaptainMoves(
+  candidates: Array<{ residentId: string }>,
+  fromZone: string,
+  toZone: string
+): string {
+  const lines = candidates.map((candidate) => candidate.residentId).sort();
+  return createHash('sha256')
+    .update(`${fromZone}\t${toZone}\n${lines.join('\n')}`)
+    .digest('hex');
 }
 
 function s(value: CellValue): string {
@@ -259,16 +497,44 @@ function featureProp(feature: ZoneFeature, property: string): string {
   return v == null ? '' : String(v).trim();
 }
 
-// Reconcile the master's zone + captain-contact columns against the polygon set.
-// READ-ONLY: computes what a refresh would change and categorizes every row.
+function prioritizeDetailRows(rows: ZoneReconcileRow[]): ZoneReconcileRow[] {
+  return [...rows].sort((a, b) => {
+    const byOutcome = OUTCOME_DETAIL_PRIORITY[a.outcome] - OUTCOME_DETAIL_PRIORITY[b.outcome];
+    if (byOutcome !== 0) return byOutcome;
+    if (a.multiZone !== b.multiZone) return a.multiZone ? -1 : 1;
+    return a.masterRow - b.masterRow;
+  });
+}
+
+function finalizeDetailRows(rows: ZoneReconcileRow[]): {
+  rows: ZoneReconcileRow[];
+  detailTruncated: boolean;
+  detailTotal: number;
+} {
+  const detailTotal = rows.length;
+  if (detailTotal <= ZONE_DETAIL_ROW_LIMIT) {
+    return { rows, detailTruncated: false, detailTotal };
+  }
+  return {
+    rows: prioritizeDetailRows(rows).slice(0, ZONE_DETAIL_ROW_LIMIT),
+    detailTruncated: true,
+    detailTotal,
+  };
+}
+
+// Reconcile (or enrich) the master's zone + captain-contact columns against the
+// polygon set. READ-ONLY: computes what a refresh would change and categorizes
+// every row. Missing ZoneName/NC columns are proposed outputs, not config errors.
 export function reconcileZones(
   masterGrid: Grid,
   features: ZoneFeatureCollection,
-  cfg: ZoneReconcileConfig
+  cfg: ZoneReconcileConfig,
+  options: ReconcileZonesOptions = {}
 ): ZoneReconcileReport {
   const generatedAt = new Date().toISOString();
   const index = buildSpatialIndex(features);
   const featuresLoaded = index.length;
+  const writeProposals: ZoneWriteProposal[] = [];
 
   const resolution: ResolvedHeaderInfo[] = [
     { field: 'Latitude', header: cfg.latHeader, matched: Boolean(cfg.latHeader) },
@@ -279,6 +545,16 @@ export function reconcileZones(
     { field: 'NC Email', header: cfg.ncEmailHeader, matched: Boolean(cfg.ncEmailHeader) },
     { field: 'resident_id', header: cfg.identityHeader, matched: Boolean(cfg.identityHeader) },
   ];
+  const outputHeaders: Record<ZoneOutputFieldSpec['key'], string | null> = {
+    zone: cfg.zoneHeader,
+    ncName: cfg.ncNameHeader,
+    ncPhone: cfg.ncPhoneHeader,
+    ncEmail: cfg.ncEmailHeader,
+  };
+  const proposedColumns = ZONE_OUTPUT_FIELDS.filter((spec) => !outputHeaders[spec.key]).map(
+    (spec) => spec.canonical
+  );
+  const enrichmentMode = proposedColumns.length > 0;
 
   const emptySummary: ZoneReconcileSummary = {
     featuresLoaded,
@@ -293,6 +569,7 @@ export function reconcileZones(
     multiZone: 0,
     distinctZonesInMaster: 0,
     distinctZonesComputed: 0,
+    columnsToAdd: proposedColumns.length,
   };
 
   const header0 = (masterGrid[0] || []).map((h) => s(h));
@@ -302,28 +579,17 @@ export function reconcileZones(
   const idIdx = headerIndex(header0, cfg.identityHeader);
   const nameIdx = headerIndex(header0, cfg.nameHeader);
 
-  const ncIdx: Record<string, number> = {
-    ncName: headerIndex(header0, cfg.ncNameHeader),
-    ncPhone: headerIndex(header0, cfg.ncPhoneHeader),
-    ncEmail: headerIndex(header0, cfg.ncEmailHeader),
-  };
-
   if (latIdx === -1 || lonIdx === -1) {
     return {
       generatedAt,
       summary: emptySummary,
       resolution,
+      proposedColumns,
+      enrichmentMode,
+      detailTruncated: false,
+      detailTotal: 0,
       configError:
         'Latitude/Longitude columns could not be located on the master. Confirm the Field Dictionary aliases for Latitude and Longitude.',
-      rows: [],
-    };
-  }
-  if (zoneIdx === -1) {
-    return {
-      generatedAt,
-      summary: emptySummary,
-      resolution,
-      configError: 'ZoneName column could not be located on the master.',
       rows: [],
     };
   }
@@ -332,6 +598,10 @@ export function reconcileZones(
       generatedAt,
       summary: emptySummary,
       resolution,
+      proposedColumns,
+      enrichmentMode,
+      detailTruncated: false,
+      detailTotal: 0,
       configError: 'No zone polygons were loaded. Check the Mapbox zone source connection and token.',
       rows: [],
     };
@@ -346,7 +616,7 @@ export function reconcileZones(
     const row = masterGrid[i] || [];
     const residentId = idIdx !== -1 ? s(row[idIdx]) : '';
     // Skip fully blank spacer rows (no id and no coordinates and no zone).
-    const currentZone = s(row[zoneIdx]);
+    const currentZone = zoneIdx === -1 ? '' : s(row[zoneIdx]);
     const rawLat = row[latIdx];
     const rawLon = row[lonIdx];
     if (residentId === '' && currentZone === '' && s(rawLat) === '' && s(rawLon) === '') {
@@ -373,6 +643,7 @@ export function reconcileZones(
         computedZone: '',
         multiZone: false,
         contactChanges: [],
+        outputValues: [],
       });
       continue;
     }
@@ -394,6 +665,7 @@ export function reconcileZones(
         computedZone: '',
         multiZone: false,
         contactChanges: [],
+        outputValues: [],
       });
       continue;
     }
@@ -401,19 +673,42 @@ export function reconcileZones(
     const computedZone = featureProp(feature, 'ZoneName');
     if (computedZone !== '') computedZones.add(computedZone);
 
-    // NC contact-field changes (blank->value or changed value).
+    const outputValues: DerivedFieldPreview[] = ZONE_OUTPUT_FIELDS.map((spec) => {
+      const header = outputHeaders[spec.key];
+      const idx = headerIndex(header0, header);
+      return {
+        field: spec.canonical,
+        current: idx === -1 ? '' : s(row[idx]),
+        computed: featureProp(feature, spec.property),
+        columnExists: idx !== -1,
+      };
+    });
+
+    // NC contact-field changes (blank->value or changed value). A missing
+    // output column is treated as a blank current value and proposed for
+    // creation; derived outputs are not required inputs.
     const contactChanges: FieldChange[] = [];
-    for (const spec of ZONE_OUTPUT_FIELDS) {
-      if (spec.key === 'zone') continue;
-      const idx = ncIdx[spec.key];
-      if (idx === -1) continue; // column not on master; skip (route reports it)
-      const current = s(row[idx]);
-      const computed = featureProp(feature, spec.property);
-      if (computed !== '' && computed !== current) {
-        contactChanges.push({ field: spec.canonical, from: current, to: computed });
+    for (const value of outputValues) {
+      if (value.field === 'ZoneName') continue;
+      if (value.computed !== '' && value.computed !== value.current) {
+        contactChanges.push({ field: value.field, from: value.current, to: value.computed });
       }
     }
     if (contactChanges.length > 0) summary.contactUpdates++;
+
+    // Live enrichment (v1) is fill_blank only: never overwrite a non-blank cell.
+    if (options.collectWriteProposals && residentId) {
+      for (const value of outputValues) {
+        if (value.computed !== '' && value.current === '') {
+          writeProposals.push({
+            residentId,
+            column: value.field,
+            value: value.computed,
+            policy: 'fill_blank',
+          });
+        }
+      }
+    }
 
     let outcome: ZoneOutcome;
     if (currentZone === '') {
@@ -441,11 +736,24 @@ export function reconcileZones(
       computedZone,
       multiZone,
       contactChanges,
+      outputValues,
     });
   }
 
   summary.distinctZonesInMaster = masterZones.size;
   summary.distinctZonesComputed = computedZones.size;
 
-  return { generatedAt, summary, resolution, configError: '', rows };
+  const detail = finalizeDetailRows(rows);
+  return {
+    generatedAt,
+    summary,
+    resolution,
+    proposedColumns,
+    enrichmentMode,
+    detailTruncated: detail.detailTruncated,
+    detailTotal: detail.detailTotal,
+    configError: '',
+    rows: detail.rows,
+    ...(options.collectWriteProposals ? { writeProposals } : {}),
+  };
 }

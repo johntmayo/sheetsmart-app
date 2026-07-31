@@ -9,6 +9,9 @@ import {
   findContainingFeature,
   findContainingFeatures,
   reconcileZones,
+  planZoneEnrichment,
+  planCaptainSheetMoves,
+  ZONE_DETAIL_ROW_LIMIT,
   type ZoneFeatureCollection,
   type ZoneReconcileConfig,
   type Grid,
@@ -217,6 +220,125 @@ test('reconcileZones: surfaces captain-contact (NC) changes as fill/updates', ()
   assert.deepStrictEqual(fields, ['NC Email', 'NC Name', 'NC Phone']);
 });
 
+test('reconcileZones: raw master treats missing derived columns as proposed outputs', () => {
+  const rawConfig: ZoneReconcileConfig = {
+    ...CFG,
+    zoneHeader: null,
+    ncNameHeader: null,
+    ncPhoneHeader: null,
+    ncEmailHeader: null,
+  };
+  // Mimic the historical 48-column raw master: lots of base fields, none of the
+  // four derived ZoneName / NC outputs.
+  const rawHeaders = [
+    'resident_id',
+    'Resident Name',
+    'Address',
+    'APN',
+    'Latitude',
+    'Longitude',
+    'Phone',
+    'Email',
+    ...Array.from({ length: 40 }, (_, i) => `Extra Field ${i + 1}`),
+  ];
+  assert.strictEqual(rawHeaders.length, 48);
+  assert.ok(!rawHeaders.includes('ZoneName'));
+  assert.ok(!rawHeaders.includes('NC Name'));
+
+  const rawGrid: Grid = [
+    rawHeaders,
+    ['r1', 'Rosa', '1 Main', 'APN-1', 5, 5, '555-0100', 'rosa@example.org', ...Array(40).fill('')],
+    ['r2', 'Sam', '2 Main', 'APN-2', 25, 25, '', '', ...Array(40).fill('')],
+    ['r3', 'Uma', '3 Main', 'APN-3', 90, 90, '', '', ...Array(40).fill('')],
+  ];
+
+  const report = reconcileZones(rawGrid, fc(), rawConfig);
+
+  assert.strictEqual(report.configError, '');
+  assert.strictEqual(report.enrichmentMode, true);
+  assert.deepStrictEqual(report.proposedColumns, ['ZoneName', 'NC Name', 'NC Phone', 'NC Email']);
+  assert.strictEqual(report.summary.columnsToAdd, 4);
+  assert.strictEqual(report.summary.wouldFillZone, 2);
+  assert.strictEqual(report.summary.contactUpdates, 2);
+  assert.strictEqual(report.summary.unassigned, 1);
+  assert.strictEqual(report.summary.wouldChangeZone, 0);
+  assert.strictEqual(report.detailTruncated, false);
+
+  const byId = Object.fromEntries(report.rows.map((r) => [r.residentId, r]));
+  assert.strictEqual(byId['r1'].outcome, 'fill');
+  assert.strictEqual(byId['r2'].outcome, 'fill');
+  assert.strictEqual(byId['r3'].outcome, 'unassigned');
+  assert.deepStrictEqual(
+    byId['r1'].outputValues.map((value) => ({
+      field: value.field,
+      current: value.current,
+      computed: value.computed,
+      columnExists: value.columnExists,
+    })),
+    [
+      { field: 'ZoneName', current: '', computed: 'Zone A', columnExists: false },
+      { field: 'NC Name', current: '', computed: 'Ada Captain', columnExists: false },
+      { field: 'NC Phone', current: '', computed: '555-0001', columnExists: false },
+      { field: 'NC Email', current: '', computed: 'ada@example.org', columnExists: false },
+    ]
+  );
+  assert.strictEqual(byId['r2'].computedZone, 'Zone B');
+  assert.strictEqual(byId['r2'].outputValues.find((v) => v.field === 'NC Name')?.computed, 'Ben Captain');
+});
+
+test('planZoneEnrichment: builds fill_blank proposals and a stable fingerprint', () => {
+  const rawConfig: ZoneReconcileConfig = {
+    ...CFG,
+    zoneHeader: null,
+    ncNameHeader: null,
+    ncPhoneHeader: null,
+    ncEmailHeader: null,
+  };
+  const rawGrid: Grid = [
+    ['resident_id', 'Resident Name', 'Latitude', 'Longitude'],
+    ['r1', 'Rosa', 5, 5],
+    ['r2', 'Sam', 25, 25],
+  ];
+  const plan = planZoneEnrichment(rawGrid, fc(), rawConfig);
+  assert.strictEqual(plan.columnsToAdd.length, 4);
+  assert.strictEqual(plan.cellsToFill, 8); // 2 residents × 4 fields
+  assert.strictEqual(plan.residentsTouched, 2);
+  assert.ok(plan.fingerprint.length === 64);
+  assert.ok(plan.proposals.every((p) => p.policy === 'fill_blank'));
+  assert.deepStrictEqual(
+    plan.proposals.filter((p) => p.residentId === 'r1').map((p) => p.column).sort(),
+    ['NC Email', 'NC Name', 'NC Phone', 'ZoneName']
+  );
+
+  const again = planZoneEnrichment(rawGrid, fc(), rawConfig);
+  assert.strictEqual(again.fingerprint, plan.fingerprint);
+});
+
+test('reconcileZones: caps oversized detail lists without changing summary counts', () => {
+  const rawConfig: ZoneReconcileConfig = {
+    ...CFG,
+    zoneHeader: null,
+    ncNameHeader: null,
+    ncPhoneHeader: null,
+    ncEmailHeader: null,
+  };
+  const grid: Grid = [['resident_id', 'Resident Name', 'Latitude', 'Longitude']];
+  for (let i = 0; i < ZONE_DETAIL_ROW_LIMIT + 25; i++) {
+    // Keep every point inside Zone A so each becomes a fill/enrichment row.
+    grid.push([`r${i}`, `Person ${i}`, 5, 5]);
+  }
+
+  const report = reconcileZones(grid, fc(), rawConfig);
+  assert.strictEqual(report.enrichmentMode, true);
+  assert.strictEqual(report.summary.wouldFillZone, ZONE_DETAIL_ROW_LIMIT + 25);
+  assert.strictEqual(report.summary.contactUpdates, ZONE_DETAIL_ROW_LIMIT + 25);
+  assert.strictEqual(report.detailTruncated, true);
+  assert.strictEqual(report.detailTotal, ZONE_DETAIL_ROW_LIMIT + 25);
+  assert.strictEqual(report.rows.length, ZONE_DETAIL_ROW_LIMIT);
+  assert.ok(report.rows.every((row) => row.outcome === 'fill'));
+  assert.ok(report.rows.every((row) => row.outputValues.length === 4));
+});
+
 test('reconcileZones: missing lat/lon columns yields a clear configError, no rows', () => {
   const grid: Grid = [['resident_id', 'ZoneName'], ['r1', 'Zone A']];
   const report = reconcileZones(grid, fc(), CFG);
@@ -228,4 +350,27 @@ test('reconcileZones: empty polygon set yields a clear configError', () => {
   const grid: Grid = [HEADER, ['r1', 'Rosa', 5, 5, '', '', '', '']];
   const report = reconcileZones(grid, { features: [] }, CFG);
   assert.match(report.configError, /zone polygons/i);
+});
+
+test('planCaptainSheetMoves: proposes only residents whose computed zone is the destination', () => {
+  const fromGrid: Grid = [
+    ['resident_id', 'Resident Name', 'ZoneName'],
+    ['stay', 'Stays Here', 'Zone A'],
+    ['move', 'Should Move', 'Zone A'],
+    ['no-coords', 'Missing Coords', 'Zone A'],
+  ];
+  const masterGrid: Grid = [
+    ['resident_id', 'Resident Name', 'Latitude', 'Longitude', 'ZoneName'],
+    ['stay', 'Stays Here', 5, 5, 'Zone A'],
+    ['move', 'Should Move', 25, 25, 'Zone A'],
+    ['no-coords', 'Missing Coords', '', '', 'Zone A'],
+  ];
+  const plan = planCaptainSheetMoves(fromGrid, masterGrid, fc(), CFG, 'Zone A', 'Zone B');
+  assert.strictEqual(plan.errors.length, 0);
+  assert.deepStrictEqual(
+    plan.candidates.map((row) => ({ id: row.residentId, to: row.computedZone })),
+    [{ id: 'move', to: 'Zone B' }]
+  );
+  assert.ok(plan.skipped.some((row) => row.residentId === 'no-coords'));
+  assert.ok(plan.fingerprint.length === 64);
 });

@@ -50,10 +50,33 @@ Plus **Phase A** of the realized vision (`SHEETSMART_VISION_AND_ROADMAP.md`):
   text-safe flags, default sync policy, and aliases. This is where column drift
   becomes a managed fact instead of a silent guess.
 
-**Not built yet (later phases, and they need your real sheets to build safely):**
-Audit report, dry-run/live execution of workflows, the parity harness, and the
-schema (rename/delete) operations. The "Dry run / Live run" buttons are visible
-but disabled until then.
+Plus **Phase B and the first Phase-C vertical slice**:
+
+- Ambient Health audit, guided dry-run previews, and read-only Mapbox zone
+  reconciliation — including an enrichment plan from the raw 48-column master
+  when ZoneName/NC columns are absent (preview only; no zone write yet).
+- A **copies-only reversible live playbook** for adding missing residents to one
+  captain-sheet copy: configure copies → preview exact identities → approve →
+  append → review in Runs → undo.
+- A **master-copy-only reversible zone enrichment playbook**: preview computed
+  ZoneName/NC values on the raw Master Data File tab → approve → add columns +
+  fill blanks → undo.
+- A **copies-only re-zone move playbook**: configure source + destination
+  captain copies in the testing folder → preview per-resident before/after
+  (current sheet/zone → Mapbox-computed zone) → approve selected rows →
+  guarded append to destination + identity-based delete from source → Undo
+  from Runs (restores unchanged rows; edited rows become conflicts).
+- Pre-write `run_snapshots`, identity-based execution rechecks, durable append/
+  undo logs, and undo that preserves rows edited after the original run.
+- Verified end-to-end on July 31, 2026 with a synthetic resident: append and
+  undo both succeeded, then the copies were restored to their starting state.
+  Master-copy enrichment was also verified end-to-end. The move playbook is
+  built and unit-tested; live verification waits on a second captain copy in
+  the testing folder.
+
+**Still gated:** folder-wide live execution, production-sheet writes,
+pull-to-master + conflict resolutions, and destructive schema operations.
+Captain-sheet moves stay on copies until the Operator watches a live run.
 
 ---
 
@@ -174,8 +197,8 @@ Section 9 of the handoff.)
     copy). Point SheetSmart at the copies for the first live-write tests. These
     copies also become the parity-harness fixtures. Only switch to the real
     sheets once the copies behave correctly.
-12. Learn Google Sheets **Version history** (File → Version history) — that's
-    your undo button.
+12. Learn Google Sheets **Version history** as a second safety net. SheetSmart
+    now owns snapshot-backed undo for its first copies-only live playbook.
 
 ### D. Hosting (later, when you want it online — see handoff Section 9D/E)
 Render.com paid always-on instance (~$7/mo) + a small persistent disk for the
@@ -194,7 +217,8 @@ app/
 │   ├── config.ts              env/config (nothing else reads process.env)
 │   ├── db.ts                  SQLite + full schema (thin, swappable)
 │   ├── auth.ts                admin password + signed session cookie
-│   ├── google.ts              service-account client, retry, A1 helpers (read-only)
+│   ├── google.ts              service-account client, retry, batched read/write helpers
+│   ├── executionTasks.ts      copies-only append + identity-based undo jobs
 │   ├── jobs.ts                in-process job queue (restart-durable)
 │   ├── dictionarySeed.ts      the 52-field Field Dictionary seed
 │   ├── types.ts               shared backend types (injected Deps, etc.)
@@ -202,7 +226,8 @@ app/
 │   │   ├── values.ts          cell-equality semantics (ported)
 │   │   ├── columns.ts         fuzzy column matcher + zone detection (ported)
 │   │   ├── writeGuard.ts      THE safety decision point (ported, tested)
-│   │   └── mergeEngine.ts     pure merge/append planners (ported, tested)
+│   │   ├── mergeEngine.ts     pure merge/append planners (ported, tested)
+│   │   └── liveWriteEngine.ts fresh identity rechecks + safe revert planning
 │   └── routes/                auth, status, connections, workflows, settings, runs, audit, dictionary
 ├── dist/                      compiled backend output (git-ignored; `npm run build`)
 ├── web/                       realized frontend — React + Vite + TypeScript

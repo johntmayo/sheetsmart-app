@@ -39,6 +39,10 @@ export interface RunSummary {
   finished_at: string | null;
   created_at?: string;
   summary_json?: string;
+  snapshot_count?: number;
+  unreverted_append_count?: number;
+  unreverted_cell_count?: number;
+  unreverted_delete_count?: number;
 }
 
 export interface StatusResponse {
@@ -259,6 +263,131 @@ export interface PreviewResponse {
   sheets: (CellFillSheet | PushMissingSheet)[];
 }
 
+// ---- Phase C safe-copy execution ----
+
+export interface SafeCopyTarget {
+  masterSpreadsheetId: string;
+  masterTab: string;
+  captainSpreadsheetId: string;
+  captainTab: string;
+  folderId: string;
+  masterName: string;
+  captainName: string;
+}
+
+export interface SafeCopyTargetResponse {
+  configured: boolean;
+  target: SafeCopyTarget | null;
+}
+
+export interface SafeCopyResident {
+  residentId: string;
+  residentName: string;
+  masterRow: number;
+  flagged: boolean;
+}
+
+export interface SafeCopyPreviewResponse {
+  runId: number;
+  target: SafeCopyTarget;
+  impact: PushMissingImpact;
+  detectedZone: string;
+  residents: SafeCopyResident[];
+  canApply: boolean;
+}
+
+export interface EnrichZonesImpact {
+  headline: string;
+  detail: string;
+  columnsToAdd: number;
+  cellsToFill: number;
+  residentsTouched: number;
+  wouldChangeZone: number;
+  unassigned: number;
+}
+
+export interface EnrichZonesSampleRow {
+  residentId: string;
+  residentName: string;
+  masterRow: number;
+  computedZone: string;
+  values: Record<string, string>;
+}
+
+export interface EnrichZonesPreviewResponse {
+  runId: number;
+  target: SafeCopyTarget;
+  enrichmentTab: string;
+  impact: EnrichZonesImpact;
+  columnsToAdd: string[];
+  sample: EnrichZonesSampleRow[];
+  canApply: boolean;
+}
+
+export interface MoveCopyTarget {
+  masterSpreadsheetId: string;
+  masterTab: string;
+  fromCaptainSpreadsheetId: string;
+  fromCaptainTab: string;
+  toCaptainSpreadsheetId: string;
+  toCaptainTab: string;
+  folderId: string;
+  masterName: string;
+  fromCaptainName: string;
+  toCaptainName: string;
+  fromZoneOverride: string;
+  toZoneOverride: string;
+}
+
+export interface MoveCopyTargetResponse {
+  configured: boolean;
+  target: MoveCopyTarget | null;
+  suggested: {
+    masterSpreadsheetId: string;
+    masterTab: string;
+    fromCaptainSpreadsheetId: string;
+    fromCaptainTab: string;
+    folderId: string;
+  } | null;
+}
+
+export interface MoveResidentRow {
+  residentId: string;
+  residentName: string;
+  fromZone: string;
+  toZone: string;
+  currentZoneOnSheet: string;
+  computedZone: string;
+  fromSheet: string;
+  toSheet: string;
+}
+
+export interface MoveResidentsImpact {
+  headline: string;
+  detail: string;
+  moved: number;
+  skipped: number;
+  fromZone: string;
+  toZone: string;
+}
+
+export interface MoveResidentsPreviewResponse {
+  runId: number;
+  target: MoveCopyTarget;
+  impact: MoveResidentsImpact;
+  fromZone: string;
+  toZone: string;
+  residents: MoveResidentRow[];
+  skipped: Array<{ residentId: string; reason: string }>;
+  canApply: boolean;
+}
+
+export interface QueuedRunResponse {
+  runId: number;
+  jobId: number;
+  status: 'queued';
+}
+
 // ---- Zone Health (Workflow A) — mirrors src/lib/zoneEngine.ts ----
 
 export type ZoneOutcome = 'match' | 'fill' | 'conflict' | 'unassigned' | 'missing_coords';
@@ -267,6 +396,13 @@ export interface ZoneFieldChange {
   field: string;
   from: string;
   to: string;
+}
+
+export interface ZoneDerivedFieldPreview {
+  field: string;
+  current: string;
+  computed: string;
+  columnExists: boolean;
 }
 
 export interface ZoneReconcileRow {
@@ -278,6 +414,7 @@ export interface ZoneReconcileRow {
   computedZone: string;
   multiZone: boolean;
   contactChanges: ZoneFieldChange[];
+  outputValues: ZoneDerivedFieldPreview[];
 }
 
 export interface ZoneReconcileSummary {
@@ -293,6 +430,7 @@ export interface ZoneReconcileSummary {
   multiZone: number;
   distinctZonesInMaster: number;
   distinctZonesComputed: number;
+  columnsToAdd: number;
 }
 
 export interface ZoneResolvedHeader {
@@ -305,6 +443,10 @@ export interface ZoneReconcileReport {
   generatedAt: string;
   summary: ZoneReconcileSummary;
   resolution: ZoneResolvedHeader[];
+  proposedColumns: string[];
+  enrichmentMode: boolean;
+  detailTruncated: boolean;
+  detailTotal: number;
   configError: string;
   rows: ZoneReconcileRow[];
 }

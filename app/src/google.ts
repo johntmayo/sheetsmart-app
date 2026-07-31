@@ -42,6 +42,13 @@ export interface SpreadsheetMeta {
   tabs: string[];
 }
 
+export interface SheetProperties {
+  sheetId: number;
+  title: string;
+  rowCount: number;
+  columnCount: number;
+}
+
 let cached: GoogleClients | null = null;
 
 export function isConfigured(): boolean {
@@ -101,7 +108,7 @@ export interface RetryOptions {
 
 // Retry with exponential backoff + jitter (handoff 4.2). Wrap EVERY Sheets/
 // Drive call in this.
-export async function withRetry<T>(fn: () => Promise<T>, { attempts = 4, baseDelayMs = 700 }: RetryOptions = {}): Promise<T> {
+export async function withRetry<T>(fn: () => Promise<T>, { attempts = 8, baseDelayMs = 700 }: RetryOptions = {}): Promise<T> {
   let lastErr: unknown;
   for (let i = 0; i < attempts; i++) {
     try {
@@ -121,7 +128,11 @@ export async function withRetry<T>(fn: () => Promise<T>, { attempts = 4, baseDel
         msg.includes('timeout') ||
         msg.includes('unable to parse range');
       if (i >= attempts - 1 || !retryable) throw err;
-      const delay = baseDelayMs * 2 ** i + Math.floor(Math.random() * 250);
+      // Sheets write quotas are per-minute; wait out the window on 429/quota.
+      const quotaHit = code === 429 || msg.includes('quota') || msg.includes('rate limit');
+      const delay = quotaHit
+        ? 65_000 + Math.floor(Math.random() * 5_000)
+        : baseDelayMs * 2 ** i + Math.floor(Math.random() * 250);
       await new Promise((r) => setTimeout(r, delay));
     }
   }
@@ -201,6 +212,23 @@ export async function getSpreadsheetMeta(spreadsheetId: string): Promise<Spreads
   };
 }
 
+// Numeric sheet IDs are required for structural batchUpdate requests.
+export async function getSheetProperties(spreadsheetId: string): Promise<SheetProperties[]> {
+  const { sheets } = getClients();
+  const res = await withRetry(() =>
+    sheets.spreadsheets.get({
+      spreadsheetId,
+      fields: 'sheets.properties(sheetId,title,gridProperties(rowCount,columnCount))',
+    })
+  );
+  return (res.data.sheets ?? []).map((sheet) => ({
+    sheetId: sheet.properties?.sheetId ?? 0,
+    title: sheet.properties?.title ?? '',
+    rowCount: sheet.properties?.gridProperties?.rowCount ?? 0,
+    columnCount: sheet.properties?.gridProperties?.columnCount ?? 0,
+  }));
+}
+
 // Reads a single range's values (batched read of the whole used range is
 // preferred per 4.7; callers pass a wide range like "A1:ZZ").
 export async function readValues(spreadsheetId: string, range: string): Promise<any[][]> {
@@ -253,6 +281,24 @@ export async function updateValues(spreadsheetId: string, updates: ValueRangeUpd
     })
   );
   return res.data.totalUpdatedCells ?? 0;
+}
+
+/** Chunk large update sets and pace them under Sheets write-request quotas. */
+export async function updateValuesChunked(
+  spreadsheetId: string,
+  updates: ValueRangeUpdate[],
+  chunkSize = 2500,
+  pauseMs = 1200
+): Promise<number> {
+  if (updates.length === 0) return 0;
+  let total = 0;
+  for (let i = 0; i < updates.length; i += chunkSize) {
+    if (i > 0 && pauseMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, pauseMs));
+    }
+    total += await updateValues(spreadsheetId, updates.slice(i, i + chunkSize));
+  }
+  return total;
 }
 
 /** Append whole rows to a tab without interpreting user-entered values. */

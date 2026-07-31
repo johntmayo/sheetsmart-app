@@ -7,6 +7,7 @@ import { config, warnings } from './config';
 import * as db from './db';
 import { requireAuth } from './auth';
 import type { Deps } from './types';
+import { registerExecutionTasks } from './executionTasks';
 
 import registerAuthRoutes from './routes/auth.routes';
 import registerConnectionRoutes from './routes/connections.routes';
@@ -18,9 +19,11 @@ import registerAuditRoutes from './routes/audit.routes';
 import registerPreviewRoutes from './routes/preview.routes';
 import registerDictionaryRoutes from './routes/dictionary.routes';
 import registerZoneRoutes from './routes/zones.routes';
+import registerSafeExecutionRoutes from './routes/safeExecution.routes';
 
 export function createApp(): Express {
   db.init();
+  registerExecutionTasks();
 
   const app = express();
   app.use(express.json({ limit: '2mb' }));
@@ -43,6 +46,7 @@ export function createApp(): Express {
   registerPreviewRoutes(api, deps);
   registerDictionaryRoutes(api, deps);
   registerZoneRoutes(api, deps);
+  registerSafeExecutionRoutes(api, deps);
   app.use('/api', api);
 
   // Static frontend. Prefer the built React app (app/web/dist); fall back to the

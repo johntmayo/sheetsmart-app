@@ -8,7 +8,17 @@ export default function registerRunRoutes(api: Router, { db }: Deps): void {
     res.json(
       db.all(
         `SELECT id, workflow_id, workflow_name, type, mode, status, actor,
-                summary_json, started_at, finished_at, created_at
+                summary_json, started_at, finished_at, created_at,
+                (SELECT COUNT(*) FROM run_snapshots s WHERE s.run_id = runs.id) AS snapshot_count,
+                (SELECT COUNT(*) FROM run_snapshots s
+                 WHERE s.run_id = runs.id AND s.operation = 'row_append'
+                   AND s.reverted_by_run_id IS NULL) AS unreverted_append_count,
+                (SELECT COUNT(*) FROM run_snapshots s
+                 WHERE s.run_id = runs.id AND s.operation = 'cell_update'
+                   AND s.reverted_by_run_id IS NULL) AS unreverted_cell_count,
+                (SELECT COUNT(*) FROM run_snapshots s
+                 WHERE s.run_id = runs.id AND s.operation = 'row_delete'
+                   AND s.reverted_by_run_id IS NULL) AS unreverted_delete_count
          FROM runs ORDER BY id DESC LIMIT 200`
       )
     );
@@ -22,7 +32,14 @@ export default function registerRunRoutes(api: Router, { db }: Deps): void {
     const typeCounts = db.all('SELECT type, COUNT(*) AS n FROM run_log_entries WHERE run_id = ? GROUP BY type', [
       req.params.id,
     ]);
-    res.json({ run, job, typeCounts });
+    const snapshotCounts = db.all(
+      `SELECT operation,
+              COUNT(*) AS n,
+              SUM(CASE WHEN reverted_by_run_id IS NULL THEN 1 ELSE 0 END) AS remaining
+       FROM run_snapshots WHERE run_id = ? GROUP BY operation`,
+      [req.params.id]
+    );
+    res.json({ run, job, typeCounts, snapshotCounts });
   });
 
   // Filterable/sortable detail rows. Supports ?type= & pagination.

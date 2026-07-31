@@ -97,4 +97,4 @@ export function detectSheetZone(
 }
 
 // A single row of cell values, as returned by the Sheets API.
-type CellRow = Array<string | number | boolean | null | undefined>;
+type CellRow = Array<string | number | boolean | Date | null | undefined>;

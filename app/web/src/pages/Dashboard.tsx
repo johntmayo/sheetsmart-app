@@ -229,8 +229,9 @@ function ZoneHealth({ googleConfigured, hasMaster }: { googleConfigured: boolean
       </SectionHead>
 
       <p className="reading-copy" style={{ marginTop: 0 }}>
-        Compares each resident&apos;s latitude/longitude against your {source?.username ? '' : 'Mapbox '}zone shapes to see
-        who&apos;s in the wrong zone, who&apos;s unzoned, and whose captain (NC) contact info is stale.{' '}
+        Compares each resident&apos;s latitude/longitude against your {source?.username ? '' : 'Mapbox '}zone shapes and
+        proposes ZoneName plus captain (NC) contact values. Works on the raw 48-column master even when those four
+        columns do not exist yet — they are treated as proposed outputs, not required inputs.{' '}
         <strong>This is a read-only check — nothing is written to any sheet.</strong>
       </p>
 
@@ -270,38 +271,93 @@ function ZoneHealth({ googleConfigured, hasMaster }: { googleConfigured: boolean
   );
 }
 
+const DERIVED_ZONE_FIELDS = new Set(['ZoneName', 'NC Name', 'NC Phone', 'NC Email']);
+
 function ZoneView({ report }: { report: ZoneReconcileReport }) {
   const s = report.summary;
-  const unresolved = report.resolution.filter((r) => !r.matched).map((r) => r.field);
+  const enrichmentMode = report.enrichmentMode || (report.proposedColumns?.length ?? 0) > 0;
+  const proposedColumns = report.proposedColumns || [];
+  // Derived ZoneName/NC fields are proposed outputs on a raw master — only warn
+  // about truly required inputs (lat/lon/identity) that couldn't be found.
+  const unresolvedRequired = report.resolution
+    .filter((r) => !r.matched && !DERIVED_ZONE_FIELDS.has(r.field))
+    .map((r) => r.field);
+
   return (
     <>
+      {enrichmentMode && (
+        <div className="callout" style={{ marginTop: 16 }}>
+          <strong>Enrichment plan (read-only).</strong> This master tab is missing{' '}
+          {proposedColumns.length > 0 ? proposedColumns.join(', ') : 'the derived zone/captain columns'}. SheetSmart
+          computed them from latitude/longitude + Mapbox shapes. No columns or cells will be written until a later,
+          approval-gated live step.
+        </div>
+      )}
+
       <div className="card-grid" style={{ marginTop: 16 }}>
+        <Metric
+          value={s.columnsToAdd ?? proposedColumns.length}
+          label="Columns to add"
+          alert={(s.columnsToAdd ?? proposedColumns.length) > 0}
+        />
+        <Metric
+          value={s.wouldFillZone}
+          label={enrichmentMode ? 'Would receive a zone' : 'Unzoned → would get a zone'}
+          alert={s.wouldFillZone > 0}
+        />
         <Metric value={s.wouldChangeZone} label="Would change zone" alert={s.wouldChangeZone > 0} />
-        <Metric value={s.wouldFillZone} label="Unzoned → would get a zone" alert={s.wouldFillZone > 0} />
         <Metric value={s.unassigned} label="In no zone (valid coords)" alert={s.unassigned > 0} />
-        <Metric value={s.missingCoords} label="Missing coordinates" alert={s.missingCoords > 0} />
       </div>
       <div className="card-grid" style={{ marginTop: 16 }}>
         <Metric value={s.contactUpdates} label="Captain contact updates" alert={s.contactUpdates > 0} />
+        <Metric value={s.missingCoords} label="Missing coordinates" alert={s.missingCoords > 0} />
         <Metric value={s.matched} label="Already correct" />
         <Metric value={s.multiZone} label="In more than one zone" alert={s.multiZone > 0} />
+      </div>
+      <div className="card-grid" style={{ marginTop: 16 }}>
         <Metric value={s.featuresLoaded} label="Zone shapes loaded" />
+        <Metric value={s.distinctZonesComputed} label="Zones computed" />
+        <Metric value={s.distinctZonesInMaster} label="Zones already on master" />
+        <Metric value={s.totalResidentRows} label="Resident rows checked" />
       </div>
 
-      {unresolved.length > 0 && (
+      {unresolvedRequired.length > 0 && (
         <p className="reading-copy">
-          <strong>Heads up:</strong> couldn&apos;t locate these master column(s): {unresolved.join(', ')}. Add an alias in
-          the Field Dictionary so the check can find them.
+          <strong>Heads up:</strong> couldn&apos;t locate these required master column(s): {unresolvedRequired.join(', ')}.
+          Add an alias in the Field Dictionary so the check can find them.
         </p>
       )}
 
-      <ZoneDetailTable report={report} />
+      <ZoneDetailTable report={report} enrichmentMode={enrichmentMode} />
     </>
   );
 }
 
-function ZoneDetailTable({ report }: { report: ZoneReconcileReport }) {
-  const [open, setOpen] = useState(false);
+function formatOutputPreview(row: ZoneReconcileReport['rows'][number]): string {
+  if (row.outputValues && row.outputValues.length > 0) {
+    return row.outputValues
+      .map((v) => {
+        const arrow = v.columnExists ? `${v.current || '(blank)'} → ${v.computed || '(blank)'}` : v.computed || '(blank)';
+        const suffix = v.columnExists ? '' : ' (new)';
+        return `${v.field}: ${arrow}${suffix}`;
+      })
+      .join('; ');
+  }
+  if (row.contactChanges.length === 0) return row.computedZone || '—';
+  return row.contactChanges.map((c) => `${c.field}: ${c.from || '(blank)'} → ${c.to}`).join('; ');
+}
+
+function ZoneDetailTable({
+  report,
+  enrichmentMode,
+}: {
+  report: ZoneReconcileReport;
+  enrichmentMode: boolean;
+}) {
+  const [open, setOpen] = useState(enrichmentMode);
+  const detailTotal = report.detailTotal ?? report.rows.length;
+  const truncated = report.detailTruncated ?? false;
+
   if (report.rows.length === 0) {
     return (
       <p className="reading-copy">
@@ -312,13 +368,23 @@ function ZoneDetailTable({ report }: { report: ZoneReconcileReport }) {
   return (
     <>
       <div className="section-head" style={{ marginTop: 24 }}>
-        <h2>What a zone refresh would change</h2>
+        <h2>{enrichmentMode ? 'Raw resident → computed zone & captain values' : 'What a zone refresh would change'}</h2>
         <div className="spacer" />
-        <span className="pill warn">{report.rows.length.toLocaleString()}</span>
+        <span className="pill warn">
+          {truncated
+            ? `${report.rows.length.toLocaleString()} of ${detailTotal.toLocaleString()}`
+            : report.rows.length.toLocaleString()}
+        </span>
         <button className="btn secondary small" style={{ marginLeft: 12 }} onClick={() => setOpen((o) => !o)}>
           {open ? 'Hide' : 'Show'}
         </button>
       </div>
+      {truncated && (
+        <p className="reading-copy" style={{ marginTop: 0 }}>
+          Showing a prioritized sample of {report.rows.length.toLocaleString()} rows (conflicts and fills first). Summary
+          counts above cover all {detailTotal.toLocaleString()} residents that need attention.
+        </p>
+      )}
       {open && (
         <div className="table-wrap">
           <table className="data">
@@ -330,7 +396,7 @@ function ZoneDetailTable({ report }: { report: ZoneReconcileReport }) {
                 <th className="num">Row</th>
                 <th>Current zone</th>
                 <th>Computed zone</th>
-                <th>Captain contact changes</th>
+                <th>{enrichmentMode ? 'Proposed ZoneName / NC values' : 'Captain contact changes'}</th>
               </tr>
             </thead>
             <tbody>
@@ -339,21 +405,21 @@ function ZoneDetailTable({ report }: { report: ZoneReconcileReport }) {
                 return (
                   <tr key={`${r.residentId}-${r.masterRow}-${i}`}>
                     <td>
-                      <span className={`pill ${meta.kind}`}>{meta.label}</span>
-                      {r.multiZone && <span className="pill warn" style={{ marginLeft: 6 }}>Overlap</span>}
+                      <span className={`pill ${meta.kind}`}>
+                        {enrichmentMode && r.outcome === 'fill' ? 'Would enrich' : meta.label}
+                      </span>
+                      {r.multiZone && (
+                        <span className="pill warn" style={{ marginLeft: 6 }}>
+                          Overlap
+                        </span>
+                      )}
                     </td>
                     <td className="mono">{r.residentId || '—'}</td>
                     <td>{r.residentName || '—'}</td>
                     <td className="num">{r.masterRow}</td>
-                    <td>{r.currentZone || '—'}</td>
+                    <td>{r.currentZone || (enrichmentMode ? '(column absent)' : '—')}</td>
                     <td>{r.computedZone || '—'}</td>
-                    <td className="truncate">
-                      {r.contactChanges.length === 0
-                        ? '—'
-                        : r.contactChanges
-                            .map((c) => `${c.field}: ${c.from || '(blank)'} → ${c.to}`)
-                            .join('; ')}
-                    </td>
+                    <td className="truncate">{formatOutputPreview(r)}</td>
                   </tr>
                 );
               })}
