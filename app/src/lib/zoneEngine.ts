@@ -321,11 +321,15 @@ export interface CaptainMoveCandidate {
   currentZoneOnSheet: string;
   computedZone: string;
   multiZone: boolean;
+  /** ZoneName + NC fields that will be written on the destination row. */
+  destinationFields: Record<string, string>;
 }
 
 export interface CaptainMovePlan {
   fromZone: string;
   toZone: string;
+  /** Shared ZoneName + NC values for the destination zone (from Mapbox). */
+  destinationFields: Record<string, string>;
   candidates: CaptainMoveCandidate[];
   skipped: Array<{ residentId: string; reason: string }>;
   errors: string[];
@@ -349,6 +353,7 @@ export function planCaptainSheetMoves(
   const plan: CaptainMovePlan = {
     fromZone: fromZone.trim(),
     toZone: toZone.trim(),
+    destinationFields: {},
     candidates: [],
     skipped: [],
     errors: [],
@@ -396,6 +401,10 @@ export function planCaptainSheetMoves(
     return plan;
   }
 
+  const destinationFeature =
+    index.find((entry) => featureProp(entry.feature, 'ZoneName') === plan.toZone)?.feature || null;
+  plan.destinationFields = destinationFieldsFromFeature(destinationFeature, plan.toZone);
+
   const masterById = new Map<string, CellValue[]>();
   if (masterIdIdx !== -1) {
     for (let i = 1; i < masterGrid.length; i++) {
@@ -436,7 +445,8 @@ export function planCaptainSheetMoves(
       continue;
     }
 
-    const computedZone = featureProp(matches[0], 'ZoneName');
+    const matched = matches[0];
+    const computedZone = featureProp(matched, 'ZoneName');
     if (!computedZone) {
       plan.skipped.push({ residentId, reason: 'Matched polygon has a blank ZoneName' });
       continue;
@@ -446,6 +456,7 @@ export function planCaptainSheetMoves(
       continue;
     }
 
+    const destinationFields = destinationFieldsFromFeature(matched, plan.toZone);
     plan.candidates.push({
       residentId,
       residentName,
@@ -454,11 +465,23 @@ export function planCaptainSheetMoves(
       currentZoneOnSheet,
       computedZone,
       multiZone: false,
+      destinationFields,
     });
   }
 
   plan.fingerprint = fingerprintCaptainMoves(plan.candidates, plan.fromZone, plan.toZone);
   return plan;
+}
+
+function destinationFieldsFromFeature(feature: ZoneFeature | null, toZone: string): Record<string, string> {
+  const fields: Record<string, string> = { ZoneName: toZone };
+  if (!feature) return fields;
+  for (const spec of ZONE_OUTPUT_FIELDS) {
+    if (spec.canonical === 'ZoneName') continue;
+    const value = featureProp(feature, spec.property);
+    if (value) fields[spec.canonical] = value;
+  }
+  return fields;
 }
 
 export function fingerprintCaptainMoves(

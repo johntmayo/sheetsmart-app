@@ -1,5 +1,25 @@
 # SheetSmart — Phase C Handoff & Continuation Prompt (Safe Execution + Undo)
 
+## August 3, 2026 progress update — live move verified + UX/NC fixups
+
+Operator verified the copies-only move playbook end-to-end with a synthetic
+resident on Zone 1 → Zone 47 captain copies (lat/lon only on the Zone 1 row;
+person not on master). Live move succeeded and updated ZoneName.
+
+Follow-up fixes after that test:
+- Move form layout: clear **From** / **To** columns, shared testing-folder
+  block, master tucked under an optional disclosure (not required when the
+  source sheet already has Latitude/Longitude).
+- Moves now also set **NC Name / NC Phone / NC Email** from Mapbox for the
+  destination zone (not just ZoneName).
+- Master copy is optional for move-target save/preview/apply.
+
+Operator confirmed Undo of the first live move succeeded (row back on Zone 1,
+gone from Zone 47). A second preview→move after restart will exercise the
+NC-field update. Append + enrichment loops unchanged.
+
+Tests: **63/63 pass**. Typecheck + both builds clean.
+
 ## July 31, 2026 progress update — re-zone captain-sheet moves (copies only)
 
 Use Case 1’s remaining “doing” half is built as a third reversible live playbook
@@ -17,11 +37,9 @@ on **copies only**:
   support empty destination test sheets. Production master ID is hard-refused.
 - Setting key: `safe_copy_move_target`. Tasks: `move_residents_copy`,
   `revert_move_copy`.
-- UI verified in browser on http://localhost:3001/playbooks (form pre-fills
-  from the existing safe-copy target; destination copy still empty).
-- **Live E2E not yet run** — needs a second captain copy in the testing folder
-  (and ideally 1–2 synthetic residents on the source whose lat/lon fall in the
-  destination zone). Append + enrichment loops were left untouched.
+- UI verified in browser on http://localhost:3001/playbooks.
+- Live E2E later verified Aug 3 (Zone 1 → Zone 47 synthetic). Append +
+  enrichment loops left untouched.
 
 Tests after this slice: **63/63 pass**, 0 skipped. Backend typecheck and both
 builds clean.

@@ -89,6 +89,7 @@ export interface MoveResidentsPreviewPlan {
   target: MoveCopyTarget;
   fromZone: string;
   toZone: string;
+  destinationFields: Record<string, string>;
   expectedResidentIds: string[];
   fingerprint: string;
   generatedAt: string;
@@ -678,8 +679,12 @@ async function moveResidentsCopy(ctx: JobContext): Promise<unknown> {
   const expectedFingerprint = String(ctx.params.fingerprint || '').trim();
   const expectedFromZone = String(ctx.params.fromZone || '').trim();
   const expectedToZone = String(ctx.params.toZone || '').trim();
+  const expectedDestinationFields =
+    ctx.params.destinationFields && typeof ctx.params.destinationFields === 'object'
+      ? (ctx.params.destinationFields as Record<string, string>)
+      : { ZoneName: expectedToZone };
   if (!expectedFingerprint) throw new Error('Approved move fingerprint is missing.');
-  assertCopyMaster(target.masterSpreadsheetId);
+  if (target.masterSpreadsheetId) assertCopyMaster(target.masterSpreadsheetId);
   assertNotProductionSheet(target.fromCaptainSpreadsheetId, 'source captain');
   assertNotProductionSheet(target.toCaptainSpreadsheetId, 'destination captain');
 
@@ -688,11 +693,12 @@ async function moveResidentsCopy(ctx: JobContext): Promise<unknown> {
   }
 
   ctx.reportProgress({ stage: 'reading', message: 'Rechecking both captain copies and zone shapes before moving anyone.' });
-  const [masterGrid, fromGrid, toGrid] = await Promise.all([
-    readGrid(target.masterSpreadsheetId, target.masterTab),
-    readGrid(target.fromCaptainSpreadsheetId, target.fromCaptainTab),
-    readGrid(target.toCaptainSpreadsheetId, target.toCaptainTab),
-  ]);
+  const fromGrid = await readGrid(target.fromCaptainSpreadsheetId, target.fromCaptainTab);
+  const toGrid = await readGrid(target.toCaptainSpreadsheetId, target.toCaptainTab);
+  const masterGrid =
+    target.masterSpreadsheetId && target.masterTab
+      ? await readGrid(target.masterSpreadsheetId, target.masterTab)
+      : [trimHeaders(fromGrid[0])];
 
   const fromZone = target.fromZoneOverride || detectSheetZone(trimHeaders(fromGrid[0]), fromGrid.slice(1));
   const toZone = target.toZoneOverride || detectSheetZone(trimHeaders(toGrid[0]), toGrid.slice(1));
@@ -702,7 +708,7 @@ async function moveResidentsCopy(ctx: JobContext): Promise<unknown> {
     );
   }
 
-  const cfg = resolveZoneConfig(trimHeaders(masterGrid[0]));
+  const cfg = resolveZoneConfig(trimHeaders(masterGrid[0]?.length ? masterGrid[0] : fromGrid[0]));
   const features = await fetchZoneFeatures(loadZoneSource());
   const proposal = planCaptainSheetMoves(fromGrid, masterGrid, features, cfg, fromZone, toZone);
   if (proposal.errors.length > 0) throw new Error(proposal.errors.join('; '));
@@ -718,14 +724,15 @@ async function moveResidentsCopy(ctx: JobContext): Promise<unknown> {
   );
   if (
     !sameIdentities(expectedResidentIds, freshIds) ||
-    freshFingerprint !== expectedFingerprint
+    freshFingerprint !== expectedFingerprint ||
+    JSON.stringify(proposal.destinationFields) !== JSON.stringify(expectedDestinationFields)
   ) {
     throw new Error(
       'The captain copies or zone shapes changed after the preview. Nothing was written. Please run a fresh preview and approve that result.'
     );
   }
 
-  const guarded = planGuardedMoves(fromGrid, toGrid, expectedResidentIds, toZone);
+  const guarded = planGuardedMoves(fromGrid, toGrid, expectedResidentIds, proposal.destinationFields);
   if (guarded.errors.length > 0) throw new Error(guarded.errors.join('; '));
   if (!sameIdentities(
     expectedResidentIds,
@@ -1089,8 +1096,6 @@ function parseMoveTarget(value: unknown): MoveCopyTarget {
     toZoneOverride: String(raw.toZoneOverride || '').trim(),
   };
   if (
-    !target.masterSpreadsheetId ||
-    !target.masterTab ||
     !target.fromCaptainSpreadsheetId ||
     !target.fromCaptainTab ||
     !target.toCaptainSpreadsheetId ||
@@ -1098,6 +1103,9 @@ function parseMoveTarget(value: unknown): MoveCopyTarget {
     !target.folderId
   ) {
     throw new Error('Move copy target is incomplete.');
+  }
+  if (Boolean(target.masterSpreadsheetId) !== Boolean(target.masterTab)) {
+    throw new Error('Master copy and master tab must both be set, or both left blank.');
   }
   if (target.fromCaptainSpreadsheetId === target.toCaptainSpreadsheetId) {
     throw new Error('Source and destination captain copies must be different spreadsheets.');

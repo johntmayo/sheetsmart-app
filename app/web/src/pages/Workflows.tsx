@@ -647,21 +647,27 @@ function MoveResidentsPlaybook() {
       <div className="eyebrow">Third reversible live playbook · copies only</div>
       <h3 style={{ marginTop: 6 }}>Move residents between captain sheet copies</h3>
       <p className="reading-copy" style={{ marginBottom: 12 }}>
-        After a Mapbox redraw, some residents on one captain copy may now belong in another zone. Preview each
-        before/after move, approve the ones you want, append to the destination copy, remove from the source, then undo
-        from Runs if needed. Requires a second captain copy in the testing folder.
+        Move people from one captain sheet copy to another after a zone redraw. You approve each person. SheetSmart
+        copies them to the new sheet with updated ZoneName and captain contact fields, removes them from the old sheet,
+        and can undo from Runs. Copies only.
       </p>
       {error && <ErrorState message={error} />}
       {target && !configuring ? (
         <>
           <div className="callout info" style={{ marginBottom: 14 }}>
-            <strong>{target.fromCaptainName}</strong>
-            {target.fromZoneOverride ? ` · zone ${target.fromZoneOverride}` : ''}
+            <strong>From:</strong> {target.fromCaptainName}
+            {target.fromZoneOverride ? ` (${target.fromZoneOverride})` : ''}
             <br />
-            <span aria-hidden="true">→</span> <strong>{target.toCaptainName}</strong>
-            {target.toZoneOverride ? ` · zone ${target.toZoneOverride}` : ''}
-            <br />
-            Master coords from <strong>{target.masterName}</strong> · {target.masterTab}
+            <strong>To:</strong> {target.toCaptainName}
+            {target.toZoneOverride ? ` (${target.toZoneOverride})` : ''}
+            {target.masterName ? (
+              <>
+                <br />
+                <span className="card-meta">
+                  Optional master helper: {target.masterName} · {target.masterTab}
+                </span>
+              </>
+            ) : null}
           </div>
           <div className="btn-row">
             <button className="btn highlight" onClick={runPreview} disabled={previewing}>
@@ -674,58 +680,92 @@ function MoveResidentsPlaybook() {
         </>
       ) : (
         <>
-          <div className="form-grid" style={{ marginTop: 16 }}>
-            <CopyField
-              label="Master copy link or ID"
-              value={form.masterSpreadsheetId}
-              onChange={(value) => setForm({ ...form, masterSpreadsheetId: value })}
-            />
-            <CopyField
-              label="Master tab (with lat/lon)"
-              value={form.masterTab}
-              onChange={(value) => setForm({ ...form, masterTab: value })}
-            />
-            <CopyField
-              label="Source captain copy (from)"
-              value={form.fromCaptainSpreadsheetId}
-              onChange={(value) => setForm({ ...form, fromCaptainSpreadsheetId: value })}
-            />
-            <CopyField
-              label="Source tab"
-              value={form.fromCaptainTab}
-              onChange={(value) => setForm({ ...form, fromCaptainTab: value })}
-            />
-            <CopyField
-              label="Destination captain copy (to)"
-              value={form.toCaptainSpreadsheetId}
-              onChange={(value) => setForm({ ...form, toCaptainSpreadsheetId: value })}
-            />
-            <CopyField
-              label="Destination tab"
-              value={form.toCaptainTab}
-              onChange={(value) => setForm({ ...form, toCaptainTab: value })}
-            />
-            <CopyField
-              label="Testing folder link or ID"
-              value={form.folderId}
-              onChange={(value) => setForm({ ...form, folderId: value })}
-            />
-            <CopyField
-              label="Source zone override (optional)"
-              value={form.fromZoneOverride}
-              onChange={(value) => setForm({ ...form, fromZoneOverride: value })}
-            />
-            <CopyField
-              label="Destination zone override (optional)"
-              value={form.toZoneOverride}
-              onChange={(value) => setForm({ ...form, toZoneOverride: value })}
-            />
+          <div style={{ marginTop: 16, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+            <div className="card" style={{ margin: 0 }}>
+              <div className="eyebrow">From (source)</div>
+              <p className="card-meta" style={{ marginTop: 4 }}>
+                The captain sheet the person is on now
+              </p>
+              <div className="form-grid" style={{ marginTop: 12 }}>
+                <CopyField
+                  label="Source captain copy link or ID"
+                  value={form.fromCaptainSpreadsheetId}
+                  onChange={(value) => setForm({ ...form, fromCaptainSpreadsheetId: value })}
+                />
+                <CopyField
+                  label="Source tab"
+                  value={form.fromCaptainTab}
+                  onChange={(value) => setForm({ ...form, fromCaptainTab: value })}
+                />
+                <CopyField
+                  label="Source zone override (optional)"
+                  value={form.fromZoneOverride}
+                  onChange={(value) => setForm({ ...form, fromZoneOverride: value })}
+                />
+              </div>
+            </div>
+            <div className="card" style={{ margin: 0 }}>
+              <div className="eyebrow">To (destination)</div>
+              <p className="card-meta" style={{ marginTop: 4 }}>
+                The captain sheet they should move to
+              </p>
+              <div className="form-grid" style={{ marginTop: 12 }}>
+                <CopyField
+                  label="Destination captain copy link or ID"
+                  value={form.toCaptainSpreadsheetId}
+                  onChange={(value) => setForm({ ...form, toCaptainSpreadsheetId: value })}
+                />
+                <CopyField
+                  label="Destination tab"
+                  value={form.toCaptainTab}
+                  onChange={(value) => setForm({ ...form, toCaptainTab: value })}
+                />
+                <CopyField
+                  label="Destination zone override (optional)"
+                  value={form.toZoneOverride}
+                  onChange={(value) => setForm({ ...form, toZoneOverride: value })}
+                />
+              </div>
+            </div>
           </div>
-          <p className="card-meta" style={{ marginTop: 8 }}>
-            Zone overrides are for empty destination test sheets that have headers but no ZoneName values yet. Both
-            captain copies must live in the testing folder.
-          </p>
-          <div className="btn-row">
+
+          <div className="card" style={{ marginTop: 16 }}>
+            <div className="eyebrow">Shared settings</div>
+            <div className="form-grid" style={{ marginTop: 12 }}>
+              <CopyField
+                label="Testing folder link or ID"
+                value={form.folderId}
+                onChange={(value) => setForm({ ...form, folderId: value })}
+              />
+            </div>
+            <p className="card-meta" style={{ marginTop: 8 }}>
+              Both captain copies must live in this testing folder.
+            </p>
+          </div>
+
+          <details style={{ marginTop: 16 }}>
+            <summary className="reading-copy" style={{ cursor: 'pointer' }}>
+              Optional: master copy for coordinate lookup
+            </summary>
+            <p className="card-meta" style={{ marginTop: 8 }}>
+              Not required for a synthetic test person who already has Latitude/Longitude on the source sheet. For
+              real residents, SheetSmart can look up coords on the master instead.
+            </p>
+            <div className="form-grid" style={{ marginTop: 12 }}>
+              <CopyField
+                label="Master copy link or ID (optional)"
+                value={form.masterSpreadsheetId}
+                onChange={(value) => setForm({ ...form, masterSpreadsheetId: value })}
+              />
+              <CopyField
+                label="Master tab (optional)"
+                value={form.masterTab}
+                onChange={(value) => setForm({ ...form, masterTab: value })}
+              />
+            </div>
+          </details>
+
+          <div className="btn-row" style={{ marginTop: 16 }}>
             <button className="btn" onClick={saveTarget} disabled={saving}>
               {saving ? 'Verifying access…' : 'Save and verify move copies'}
             </button>
@@ -752,8 +792,17 @@ function MoveResidentsPlaybook() {
           </div>
           <p className="reading-copy">
             Before → after: <strong>{preview.fromZone}</strong> ({preview.target.fromCaptainName}) →{' '}
-            <strong>{preview.toZone}</strong> ({preview.target.toCaptainName}). Uncheck any row you do not want to move.
+            <strong>{preview.toZone}</strong> ({preview.target.toCaptainName}). ZoneName and NC Name/Phone/Email will be
+            set from Mapbox for the new zone. Uncheck any row you do not want to move.
           </p>
+          {preview.destinationFields && (
+            <p className="card-meta">
+              Destination fields:{' '}
+              {Object.entries(preview.destinationFields)
+                .map(([key, value]) => `${key}=${value}`)
+                .join(' · ')}
+            </p>
+          )}
           {preview.residents.length > 0 && (
             <div className="table-wrap">
               <table className="data">

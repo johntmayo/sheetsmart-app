@@ -435,14 +435,15 @@ export function planGuardedDeletes(
 
 /**
  * Plan a copies-only resident move: append the source row onto the destination
- * (header-joined, ZoneName set to the destination zone) and prepare an
- * identity-based delete from the source. Destination collisions are skipped.
+ * (header-joined) and prepare an identity-based delete from the source.
+ * `destinationFields` overwrites zone/captain columns on the appended row
+ * (typically ZoneName + NC Name/Phone/Email from Mapbox for the new zone).
  */
 export function planGuardedMoves(
   fromData: Grid,
   toData: Grid,
   residentIds: string[],
-  toZone: string,
+  destinationFields: Record<string, string>,
   identityColumn = 'resident_id'
 ): GuardedMovePlan {
   const plan: GuardedMovePlan = { moves: [], skipped: [], errors: [] };
@@ -458,12 +459,12 @@ export function planGuardedMoves(
     plan.errors.push(`Destination sheet has no ${identityColumn} column`);
     return plan;
   }
-  if (!toZone.trim()) {
-    plan.errors.push('Destination zone is required for a move');
+  const toZone = String(destinationFields.ZoneName || '').trim();
+  if (!toZone) {
+    plan.errors.push('Destination ZoneName is required for a move');
     return plan;
   }
 
-  const destZoneCol = toHeaders.indexOf('ZoneName');
   const seen = new Set(toIdentity.rowsById.keys());
   const proposed = new Set<string>();
 
@@ -495,7 +496,10 @@ export function planGuardedMoves(
 
     const sourceRow = fromHeaders.map((_header, colIndex) => fromData[fromRows[0]]?.[colIndex] ?? '');
     const remapped = remapRowByHeaders(fromHeaders, sourceRow, toHeaders);
-    if (destZoneCol !== -1) remapped[destZoneCol] = toZone;
+    for (const [column, value] of Object.entries(destinationFields)) {
+      const colIndex = toHeaders.indexOf(column);
+      if (colIndex !== -1 && value !== '') remapped[colIndex] = value;
+    }
 
     const guardedRow = toHeaders.map((column, index) => {
       const value = remapped[index];

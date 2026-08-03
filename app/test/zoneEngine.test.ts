@@ -371,6 +371,13 @@ test('planCaptainSheetMoves: proposes only residents whose computed zone is the 
     plan.candidates.map((row) => ({ id: row.residentId, to: row.computedZone })),
     [{ id: 'move', to: 'Zone B' }]
   );
+  assert.deepStrictEqual(plan.destinationFields, {
+    ZoneName: 'Zone B',
+    'NC Name': 'Ben Captain',
+    'NC Phone': '555-0002',
+    'NC Email': 'ben@example.org',
+  });
+  assert.deepStrictEqual(plan.candidates[0].destinationFields, plan.destinationFields);
   assert.ok(plan.skipped.some((row) => row.residentId === 'no-coords'));
   assert.ok(plan.fingerprint.length === 64);
 });

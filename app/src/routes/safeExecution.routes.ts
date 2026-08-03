@@ -313,14 +313,15 @@ export default function registerSafeExecutionRoutes(api: Router, { db }: Deps): 
     const runId = Number(runInsert.lastInsertRowid);
 
     try {
-      const [masterGrid, fromGrid, toGrid] = await Promise.all([
-        readGrid(target.masterSpreadsheetId, target.masterTab),
-        readGrid(target.fromCaptainSpreadsheetId, target.fromCaptainTab),
-        readGrid(target.toCaptainSpreadsheetId, target.toCaptainTab),
-      ]);
+      const fromGrid = await readGrid(target.fromCaptainSpreadsheetId, target.fromCaptainTab);
+      const toGrid = await readGrid(target.toCaptainSpreadsheetId, target.toCaptainTab);
+      const masterGrid =
+        target.masterSpreadsheetId && target.masterTab
+          ? await readGrid(target.masterSpreadsheetId, target.masterTab)
+          : [trimHeaders(fromGrid[0])];
       const fromZone = target.fromZoneOverride || detectSheetZone(trimHeaders(fromGrid[0]), fromGrid.slice(1));
       const toZone = target.toZoneOverride || detectSheetZone(trimHeaders(toGrid[0]), toGrid.slice(1));
-      const cfg = resolveZoneConfig(db, trimHeaders(masterGrid[0]));
+      const cfg = resolveZoneConfig(db, trimHeaders(masterGrid[0]?.length ? masterGrid[0] : fromGrid[0]));
       const features = await fetchZoneFeatures(loadZoneSource(db));
       const proposal = planCaptainSheetMoves(fromGrid, masterGrid, features, cfg, fromZone, toZone);
       if (proposal.errors.length > 0) throw new Error(proposal.errors.join('; '));
@@ -334,7 +335,7 @@ export default function registerSafeExecutionRoutes(api: Router, { db }: Deps): 
         fromGrid,
         toGrid,
         selected.map((candidate) => candidate.residentId),
-        proposal.toZone
+        proposal.destinationFields
       );
       if (guarded.errors.length > 0) throw new Error(guarded.errors.join('; '));
 
@@ -348,6 +349,7 @@ export default function registerSafeExecutionRoutes(api: Router, { db }: Deps): 
           toZone: candidate.toZone,
           currentZoneOnSheet: candidate.currentZoneOnSheet,
           computedZone: candidate.computedZone,
+          destinationFields: candidate.destinationFields,
           fromSheet: target.fromCaptainName,
           toSheet: target.toCaptainName,
         }));
@@ -355,14 +357,14 @@ export default function registerSafeExecutionRoutes(api: Router, { db }: Deps): 
       const impact = {
         headline:
           residents.length > 0
-            ? `This would move ${residents.length} resident(s) from ${target.fromCaptainName} (${proposal.fromZone}) to ${target.toCaptainName} (${proposal.toZone}).`
+            ? `This would move ${residents.length} resident(s) from ${target.fromCaptainName} (${proposal.fromZone}) to ${target.toCaptainName} (${proposal.toZone}), updating ZoneName and captain contact fields.`
             : `No residents on ${target.fromCaptainName} currently compute to zone ${proposal.toZone}.`,
-        detail:
-          'Each move appends the row to the destination copy, then removes it from the source copy by resident_id. Existing destination rows are never overwritten. Copies only.',
+        detail: `Each move copies the row to the destination sheet with ${proposal.toZone}'s zone/captain fields from Mapbox, then removes it from the source by resident_id. Copies only.`,
         moved: residents.length,
         skipped: proposal.skipped.length + guarded.skipped.length,
         fromZone: proposal.fromZone,
         toZone: proposal.toZone,
+        destinationFields: proposal.destinationFields,
       };
 
       const executionPlan: MoveResidentsPreviewPlan = {
@@ -370,6 +372,7 @@ export default function registerSafeExecutionRoutes(api: Router, { db }: Deps): 
         target,
         fromZone: proposal.fromZone,
         toZone: proposal.toZone,
+        destinationFields: proposal.destinationFields,
         expectedResidentIds: residents.map((resident) => resident.residentId),
         fingerprint,
         generatedAt: new Date().toISOString(),
@@ -384,6 +387,7 @@ export default function registerSafeExecutionRoutes(api: Router, { db }: Deps): 
         impact,
         fromZone: proposal.fromZone,
         toZone: proposal.toZone,
+        destinationFields: proposal.destinationFields,
         residents,
         skipped: [...proposal.skipped, ...guarded.skipped],
         canApply: residents.length > 0,
@@ -435,6 +439,10 @@ export default function registerSafeExecutionRoutes(api: Router, { db }: Deps): 
       plan.toZone
     );
 
+    const destinationFields = plan.destinationFields?.ZoneName
+      ? plan.destinationFields
+      : { ZoneName: plan.toZone };
+
     const queued = jobs.enqueue({
       workflowName: 'Safe copy: move residents between captain sheets',
       type: MOVE_RESIDENTS_COPY_TASK,
@@ -446,11 +454,13 @@ export default function registerSafeExecutionRoutes(api: Router, { db }: Deps): 
         fingerprint,
         fromZone: plan.fromZone,
         toZone: plan.toZone,
+        destinationFields,
       },
     });
     plan.appliedRunId = queued.runId;
     plan.expectedResidentIds = approvedIds;
     plan.fingerprint = fingerprint;
+    plan.destinationFields = destinationFields;
     const stored = { ...safeJson(preview.summary_json), ...plan };
     db.run('UPDATE runs SET summary_json = ? WHERE id = ?', [JSON.stringify(stored), previewRunId]);
     res.status(202).json({ ...queued, status: 'queued' });
@@ -683,15 +693,16 @@ function parseMoveTargetInput(body: unknown): MoveTargetInput {
     toZoneOverride: String(raw.toZoneOverride || '').trim(),
   };
   if (
-    !value.masterSpreadsheetId ||
-    !value.masterTab ||
     !value.fromCaptainSpreadsheetId ||
     !value.fromCaptainTab ||
     !value.toCaptainSpreadsheetId ||
     !value.toCaptainTab ||
     !value.folderId
   ) {
-    throw new Error('Master copy, both captain copies, their tabs, and the testing folder are all required.');
+    throw new Error('Both captain copies, their tabs, and the testing folder are required.');
+  }
+  if (value.masterSpreadsheetId && !value.masterTab) {
+    throw new Error('If you include a master copy, also set the master tab.');
   }
   if (value.fromCaptainSpreadsheetId === value.toCaptainSpreadsheetId) {
     throw new Error('Source and destination captain copies must be different spreadsheets.');
@@ -704,16 +715,13 @@ function parseMoveTargetInput(body: unknown): MoveTargetInput {
 
 async function validateMoveTarget(input: MoveTargetInput): Promise<MoveCopyTarget> {
   if (!google.isConfigured()) throw new Error('Google is not configured.');
-  const [master, fromCaptain, toCaptain, files, masterHeaders, fromHeaders, toHeaders] = await Promise.all([
-    google.getSpreadsheetMeta(input.masterSpreadsheetId),
+  const [fromCaptain, toCaptain, files, fromHeaders, toHeaders] = await Promise.all([
     google.getSpreadsheetMeta(input.fromCaptainSpreadsheetId),
     google.getSpreadsheetMeta(input.toCaptainSpreadsheetId),
     google.listSpreadsheetsInFolder(input.folderId),
-    google.readHeaders(input.masterSpreadsheetId, input.masterTab),
     google.readHeaders(input.fromCaptainSpreadsheetId, input.fromCaptainTab),
     google.readHeaders(input.toCaptainSpreadsheetId, input.toCaptainTab),
   ]);
-  if (!master.tabs.includes(input.masterTab)) throw new Error(`The master copy has no tab named "${input.masterTab}".`);
   if (!fromCaptain.tabs.includes(input.fromCaptainTab)) {
     throw new Error(`The source captain copy has no tab named "${input.fromCaptainTab}".`);
   }
@@ -730,11 +738,32 @@ async function validateMoveTarget(input: MoveTargetInput): Promise<MoveCopyTarge
     if (!fromHeaders.includes(required)) throw new Error(`The source captain copy is missing "${required}".`);
     if (!toHeaders.includes(required)) throw new Error(`The destination captain copy is missing "${required}".`);
   }
-  for (const required of ['resident_id', 'Latitude', 'Longitude']) {
-    if (!masterHeaders.includes(required)) {
-      throw new Error(`The master source tab is missing the required "${required}" column.`);
+
+  let masterName = '';
+  if (input.masterSpreadsheetId && input.masterTab) {
+    const [master, masterHeaders] = await Promise.all([
+      google.getSpreadsheetMeta(input.masterSpreadsheetId),
+      google.readHeaders(input.masterSpreadsheetId, input.masterTab),
+    ]);
+    if (!master.tabs.includes(input.masterTab)) {
+      throw new Error(`The master copy has no tab named "${input.masterTab}".`);
+    }
+    for (const required of ['resident_id', 'Latitude', 'Longitude']) {
+      if (!masterHeaders.includes(required)) {
+        throw new Error(`The master source tab is missing the required "${required}" column.`);
+      }
+    }
+    masterName = master.title;
+  } else {
+    for (const required of ['Latitude', 'Longitude']) {
+      if (!fromHeaders.includes(required)) {
+        throw new Error(
+          `No master copy was provided, so the source captain copy needs "${required}" (used to decide the new zone).`
+        );
+      }
     }
   }
+
   return {
     masterSpreadsheetId: input.masterSpreadsheetId,
     masterTab: input.masterTab,
@@ -743,7 +772,7 @@ async function validateMoveTarget(input: MoveTargetInput): Promise<MoveCopyTarge
     toCaptainSpreadsheetId: input.toCaptainSpreadsheetId,
     toCaptainTab: input.toCaptainTab,
     folderId: input.folderId,
-    masterName: master.title,
+    masterName,
     fromCaptainName: fromCaptain.title,
     toCaptainName: toCaptain.title,
     fromZoneOverride: input.fromZoneOverride || '',

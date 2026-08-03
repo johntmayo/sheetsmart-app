@@ -192,22 +192,26 @@ test('guarded deletes locate unique identities and sort bottom-up', () => {
   assert.strictEqual(plan.skipped[0].residentId, 'R-missing');
 });
 
-test('guarded moves append to destination with destination ZoneName and skip collisions', () => {
+test('guarded moves append to destination with destination ZoneName/NC fields and skip collisions', () => {
   const from = [
-    ['resident_id', 'Resident Name', 'ZoneName', 'Phone'],
-    ['R-keep', 'Stay', 'Zone A', ''],
-    ['R-move', 'Mover', 'Zone A', '626-555-9999'],
+    ['resident_id', 'Resident Name', 'ZoneName', 'NC Name', 'Phone'],
+    ['R-keep', 'Stay', 'Zone A', 'Ada', ''],
+    ['R-move', 'Mover', 'Zone A', 'Ada', '626-555-9999'],
   ];
   const to = [
-    ['resident_id', 'ZoneName', 'Phone', 'Notes'],
-    ['R-existing', 'Zone B', '', 'already here'],
+    ['resident_id', 'ZoneName', 'NC Name', 'Phone', 'Notes'],
+    ['R-existing', 'Zone B', 'Ben', '', 'already here'],
   ];
-  const plan = planGuardedMoves(from, to, ['R-move', 'R-existing', 'R-absent'], 'Zone B');
+  const plan = planGuardedMoves(from, to, ['R-move', 'R-existing', 'R-absent'], {
+    ZoneName: 'Zone B',
+    'NC Name': 'Ben Captain',
+    'NC Phone': '555-0002',
+  });
   assert.strictEqual(plan.moves.length, 1);
   assert.deepStrictEqual(plan.moves[0], {
     residentId: 'R-move',
-    appendRow: ['R-move', 'Zone B', '626-555-9999', ''],
-    sourceRow: ['R-move', 'Mover', 'Zone A', '626-555-9999'],
+    appendRow: ['R-move', 'Zone B', 'Ben Captain', '626-555-9999', ''],
+    sourceRow: ['R-move', 'Mover', 'Zone A', 'Ada', '626-555-9999'],
     sourceRowIndex: 2,
   });
   assert.deepStrictEqual(

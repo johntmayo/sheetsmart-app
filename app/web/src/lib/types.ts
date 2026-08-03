@@ -358,6 +358,7 @@ export interface MoveResidentRow {
   toZone: string;
   currentZoneOnSheet: string;
   computedZone: string;
+  destinationFields?: Record<string, string>;
   fromSheet: string;
   toSheet: string;
 }
@@ -369,6 +370,7 @@ export interface MoveResidentsImpact {
   skipped: number;
   fromZone: string;
   toZone: string;
+  destinationFields?: Record<string, string>;
 }
 
 export interface MoveResidentsPreviewResponse {
@@ -377,6 +379,7 @@ export interface MoveResidentsPreviewResponse {
   impact: MoveResidentsImpact;
   fromZone: string;
   toZone: string;
+  destinationFields?: Record<string, string>;
   residents: MoveResidentRow[];
   skipped: Array<{ residentId: string; reason: string }>;
   canApply: boolean;
