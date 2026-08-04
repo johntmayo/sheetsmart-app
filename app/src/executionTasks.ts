@@ -21,6 +21,16 @@ import {
   planZoneEnrichment,
   type ZoneReconcileConfig,
 } from './lib/zoneEngine';
+import {
+  fingerprintPullCells,
+  newResidentCellKeys,
+  planPullNewResidents,
+  planPullToMaster,
+  pullCellValueKey,
+  type PullCellChange,
+  type PullCellKey,
+} from './lib/pullEngine';
+import { cellValuesEqual } from './lib/values';
 import { fetchZoneFeatures, isMapboxConfigured, DEFAULT_MAPBOX_USERNAME, DEFAULT_MAPBOX_DATASET_ID } from './mapbox';
 import { detectSheetZone, findColumn } from './lib/columns';
 import type { CellValue } from './lib/values';
@@ -31,6 +41,9 @@ export const ENRICH_ZONES_COPY_TASK = 'enrich_zones_copy';
 export const REVERT_CELL_COPY_TASK = 'revert_cell_copy';
 export const MOVE_RESIDENTS_COPY_TASK = 'move_residents_copy';
 export const REVERT_MOVE_COPY_TASK = 'revert_move_copy';
+export const PULL_TO_MASTER_COPY_TASK = 'pull_to_master_copy';
+export const APPLY_CONFLICT_COPY_TASK = 'apply_conflict_copy';
+export const PULL_NEW_RESIDENTS_COPY_TASK = 'pull_new_residents_copy';
 
 /** Hard refuse: never enrich the production master spreadsheet. */
 export const PRODUCTION_MASTER_SPREADSHEET_ID = '1dW7oC9VlGBEfeHhl2zeq2_Td8c6QoYwjTxoqAn-3p6w';
@@ -96,6 +109,53 @@ export interface MoveResidentsPreviewPlan {
   appliedRunId?: number;
 }
 
+export interface PullToMasterPreviewPlan {
+  kind: 'pull_to_master_copy_preview';
+  target: SafeCopyTarget;
+  expectedCells: PullCellKey[];
+  fingerprint: string;
+  conflicts: number;
+  generatedAt: string;
+  appliedRunId?: number;
+}
+
+export interface NewResidentsPreviewPlan {
+  kind: 'pull_new_residents_copy_preview';
+  target: SafeCopyTarget;
+  expectedRows: PullCellKey[];
+  fingerprint: string;
+  flaggedCount: number;
+  generatedAt: string;
+  appliedRunId?: number;
+}
+
+/** Everything the Conflict Inbox needs to write one approved value back. */
+export interface ConflictContext {
+  kind: 'pull_to_master';
+  spreadsheetId: string;
+  spreadsheetName: string;
+  tabName: string;
+  residentId: string;
+  residentName: string;
+  column: string;
+  masterRow: number;
+  masterValue: string;
+  captainValue: string;
+  sourceSpreadsheetId: string;
+  sourceName: string;
+  sourceTab: string;
+}
+
+interface ConflictRow {
+  id: number;
+  status: string;
+  column: string;
+  resident_id: string;
+  existing_value: string;
+  incoming_value: string;
+  context_json: string;
+}
+
 interface SnapshotRow {
   id: number;
   spreadsheet_id: string;
@@ -124,6 +184,581 @@ export function registerExecutionTasks(): void {
   registerTask(REVERT_CELL_COPY_TASK, revertCellCopy);
   registerTask(MOVE_RESIDENTS_COPY_TASK, moveResidentsCopy);
   registerTask(REVERT_MOVE_COPY_TASK, revertMoveCopy);
+  registerTask(PULL_TO_MASTER_COPY_TASK, pullToMasterCopy);
+  registerTask(APPLY_CONFLICT_COPY_TASK, applyConflictCopy);
+  registerTask(PULL_NEW_RESIDENTS_COPY_TASK, pullNewResidentsCopy);
+}
+
+/**
+ * Append captain-created residents to the master copy as brand-new rows.
+ * Only the identities the Operator ticked are appended, and only if the rows
+ * still look exactly as they did in the preview.
+ */
+async function pullNewResidentsCopy(ctx: JobContext): Promise<unknown> {
+  requireLive(ctx);
+  const previewRunId = numberParam(ctx.params.previewRunId, 'previewRunId');
+  const target = parseTarget(ctx.params.target);
+  const expectedFingerprint = String(ctx.params.fingerprint || '').trim();
+  const approvedIds = stringArray(ctx.params.expectedResidentIds);
+  if (!expectedFingerprint) throw new Error('Approved new-resident fingerprint is missing.');
+  if (approvedIds.length === 0) throw new Error('No residents were approved.');
+  assertCopyMaster(target.masterSpreadsheetId);
+  assertNotProductionSheet(target.captainSpreadsheetId, 'captain');
+
+  ctx.reportProgress({ stage: 'reading', message: 'Rechecking the master copy and captain copy before adding anyone.' });
+  const [masterGrid, captainGrid] = await Promise.all([
+    readGrid(target.masterSpreadsheetId, target.masterTab),
+    readGrid(target.captainSpreadsheetId, target.captainTab),
+  ]);
+  const plan = planPullNewResidents(masterGrid, captainGrid);
+  if (plan.errors.length > 0) throw new Error(plan.errors.join('; '));
+
+  const approvedSet = new Set(approvedIds);
+  const approved = plan.candidates.filter((candidate) => approvedSet.has(candidate.residentId));
+  const freshFingerprint = fingerprintPullCells(newResidentCellKeys(approved));
+  if (approved.length !== approvedIds.length || freshFingerprint !== expectedFingerprint) {
+    throw new Error(
+      'The captain copy or master copy changed after the preview. Nobody was added. Please run a fresh preview and approve that result.'
+    );
+  }
+
+  const guarded = planGuardedAppends(
+    masterGrid,
+    approved.map((candidate) => candidate.row)
+  );
+  if (guarded.errors.length > 0) throw new Error(guarded.errors.join('; '));
+  if (guarded.appends.length !== approved.length) {
+    throw new Error(
+      `Only ${guarded.appends.length} of ${approved.length} approved resident(s) still pass the write guard. Nobody was added.`
+    );
+  }
+
+  const headers = trimHeaders(masterGrid[0]);
+  const riskById = new Map(approved.map((candidate) => [candidate.residentId, candidate]));
+  const snapshotIds: number[] = [];
+  const insertSnapshots = db.transaction(() => {
+    for (const append of guarded.appends) {
+      const candidate = riskById.get(append.residentId);
+      const result = db.run(
+        `INSERT INTO run_snapshots
+           (run_id, spreadsheet_id, spreadsheet_name, tab_name, operation, resident_id,
+            range_a1, before_json, after_json, metadata_json)
+         VALUES (?, ?, ?, ?, 'row_append', ?, '', 'null', ?, ?)`,
+        [
+          ctx.runId,
+          target.masterSpreadsheetId,
+          target.masterName,
+          target.masterTab,
+          append.residentId,
+          JSON.stringify(append.row),
+          JSON.stringify({
+            kind: 'new_resident_append',
+            previewRunId,
+            headers,
+            sourceSheet: target.captainName,
+            captainRow: candidate?.captainRow ?? null,
+            risk: candidate?.risk ?? 'none',
+          }),
+        ]
+      );
+      snapshotIds.push(Number(result.lastInsertRowid));
+    }
+  });
+  insertSnapshots();
+
+  ctx.reportProgress({
+    stage: 'writing',
+    message: `Adding ${guarded.appends.length} captain-created resident(s) to the master copy.`,
+  });
+  const result = await google.appendValues(
+    target.masterSpreadsheetId,
+    google.a1Range(target.masterTab, 'A:ZZ'),
+    guarded.appends.map((append) => append.row)
+  );
+  if (result.updatedRows !== guarded.appends.length) {
+    throw new Error(
+      `Google reported ${result.updatedRows} appended row(s), but ${guarded.appends.length} were approved. The run was stopped for review.`
+    );
+  }
+  if (snapshotIds.length > 0) {
+    const placeholders = snapshotIds.map(() => '?').join(',');
+    db.run(`UPDATE run_snapshots SET range_a1 = ? WHERE id IN (${placeholders})`, [
+      result.updatedRange,
+      ...snapshotIds,
+    ]);
+  }
+
+  for (const append of guarded.appends) {
+    const candidate = riskById.get(append.residentId);
+    ctx.log({
+      spreadsheet: target.masterName,
+      row: result.updatedRange,
+      resident_id: append.residentId,
+      type: 'append',
+      incoming_value: candidate?.residentName || 'New resident row',
+      message: `Added ${candidate?.residentName || append.residentId} to the master copy from ${target.captainName} row ${
+        candidate?.captainRow ?? '?'
+      }.`,
+    });
+    if (candidate && candidate.risk !== 'none') {
+      ctx.log({
+        spreadsheet: target.masterName,
+        resident_id: append.residentId,
+        type: 'sensitive',
+        existing_value: candidate.matchedResidentId,
+        message: `Approved despite a ${candidate.risk} duplicate warning: ${candidate.riskReason}`,
+      });
+    }
+  }
+
+  return {
+    previewRunId,
+    targetSpreadsheet: target.masterName,
+    targetTab: target.masterTab,
+    sourceSpreadsheet: target.captainName,
+    appended: guarded.appends.length,
+    flagged: approved.filter((candidate) => candidate.risk !== 'none').length,
+    updatedRange: result.updatedRange,
+    revertAvailable: true,
+  };
+}
+
+/**
+ * Field Dictionary policies keyed by the header they resolve to on this sheet.
+ * A column the dictionary does not know stays unlisted, so the pull planner's
+ * conflict-only default applies to it.
+ */
+export function pullPoliciesForHeaders(headers: string[]): Record<string, string> {
+  const policies: Record<string, string> = {};
+  const fields = db.all<{ id: number; canonical_name: string; default_policy: string }>(
+    'SELECT id, canonical_name, default_policy FROM dictionary_fields'
+  );
+  for (const field of fields) {
+    const aliases = db
+      .all<{ alias: string }>('SELECT alias FROM dictionary_aliases WHERE field_id = ?', [field.id])
+      .map((row) => row.alias);
+    const header = findColumn(headers, [field.canonical_name, ...aliases]);
+    if (header) policies[header] = field.default_policy;
+  }
+  return policies;
+}
+
+export function pullCellKeys(changes: PullCellChange[]): PullCellKey[] {
+  return changes.map((change) => ({
+    residentId: change.residentId,
+    column: change.column,
+    value: pullCellValueKey(change.captainValue),
+  }));
+}
+
+async function pullToMasterCopy(ctx: JobContext): Promise<unknown> {
+  requireLive(ctx);
+  const previewRunId = numberParam(ctx.params.previewRunId, 'previewRunId');
+  const target = parseTarget(ctx.params.target);
+  const expectedFingerprint = String(ctx.params.fingerprint || '').trim();
+  const approvedCells = parseCellKeys(ctx.params.approvedCells);
+  if (!expectedFingerprint) throw new Error('Approved pull fingerprint is missing.');
+  assertCopyMaster(target.masterSpreadsheetId);
+  assertNotProductionSheet(target.captainSpreadsheetId, 'captain');
+
+  ctx.reportProgress({ stage: 'reading', message: 'Rechecking the master copy and captain copy before writing.' });
+  const [masterGrid, captainGrid] = await Promise.all([
+    readGrid(target.masterSpreadsheetId, target.masterTab),
+    readGrid(target.captainSpreadsheetId, target.captainTab),
+  ]);
+  const policies = pullPoliciesForHeaders(trimHeaders(masterGrid[0]));
+  const plan = planPullToMaster(masterGrid, captainGrid, { policies });
+  if (plan.errors.length > 0) throw new Error(plan.errors.join('; '));
+
+  const approvedKeys = new Set(approvedCells.map((cell) => `${cell.residentId}\u0000${cell.column}`));
+  const approvedChanges = [...plan.fills, ...plan.overwrites].filter((change) =>
+    approvedKeys.has(`${change.residentId}\u0000${change.column}`)
+  );
+  const freshFingerprint = fingerprintPullCells(pullCellKeys(approvedChanges));
+  if (approvedChanges.length !== approvedCells.length || freshFingerprint !== expectedFingerprint) {
+    throw new Error(
+      'The captain copy or master copy changed after the preview. Nothing was written. Please run a fresh preview and approve that result.'
+    );
+  }
+
+  const recorded = recordPullConflicts(ctx.runId, target, plan.conflicts);
+
+  if (approvedChanges.length === 0) {
+    ctx.log({
+      spreadsheet: target.masterName,
+      type: 'pull_to_master',
+      message: `No cells were approved for writing. Logged ${recorded} conflict(s) for review.`,
+    });
+    return {
+      previewRunId,
+      targetSpreadsheet: target.masterName,
+      cellsWritten: 0,
+      conflictsLogged: recorded,
+      message:
+        recorded > 0
+          ? `Nothing was written. ${recorded} disagreement(s) are waiting in the Conflict inbox.`
+          : 'Nothing needed to be written.',
+    };
+  }
+
+  const guarded = planGuardedCellWrites(
+    masterGrid,
+    approvedChanges.map((change) => ({
+      residentId: change.residentId,
+      column: change.column,
+      value: change.captainValue,
+      policy: change.policy,
+    }))
+  );
+  if (guarded.errors.length > 0) throw new Error(guarded.errors.join('; '));
+  if (guarded.writes.length !== approvedChanges.length) {
+    throw new Error(
+      `Only ${guarded.writes.length} of ${approvedChanges.length} approved cell(s) still pass the write guard. Nothing was written. Please run a fresh preview.`
+    );
+  }
+
+  const insertSnapshots = db.transaction(() => {
+    for (const write of guarded.writes) {
+      const range = google.a1Range(target.masterTab, `${google.columnLetter(write.col - 1)}${write.row}`);
+      db.run(
+        `INSERT INTO run_snapshots
+           (run_id, spreadsheet_id, spreadsheet_name, tab_name, operation, resident_id,
+            range_a1, before_json, after_json, metadata_json)
+         VALUES (?, ?, ?, ?, 'cell_update', ?, ?, ?, ?, ?)`,
+        [
+          ctx.runId,
+          target.masterSpreadsheetId,
+          target.masterName,
+          target.masterTab,
+          write.residentId,
+          range,
+          JSON.stringify(write.before ?? ''),
+          JSON.stringify(write.after ?? ''),
+          JSON.stringify({ kind: 'pull_to_master', column: write.column, previewRunId }),
+        ]
+      );
+    }
+  });
+  insertSnapshots();
+
+  ctx.reportProgress({
+    stage: 'writing',
+    message: `Writing ${guarded.writes.length.toLocaleString()} approved captain value(s) to the master copy.`,
+  });
+  const updatedCells = await google.updateValuesChunked(
+    target.masterSpreadsheetId,
+    guarded.writes.map((write) => ({
+      range: google.a1Range(target.masterTab, `${google.columnLetter(write.col - 1)}${write.row}`),
+      values: [[write.after]],
+    }))
+  );
+
+  for (const write of guarded.writes) {
+    ctx.log({
+      spreadsheet: target.masterName,
+      row: write.row,
+      column: write.column,
+      resident_id: write.residentId,
+      type: write.action === 'overwrite' ? 'overwrite' : 'fill',
+      existing_value: String(write.before ?? ''),
+      incoming_value: String(write.after ?? ''),
+      message: `Pulled ${write.column} from ${target.captainName} into the master copy.`,
+    });
+  }
+
+  return {
+    previewRunId,
+    targetSpreadsheet: target.masterName,
+    targetTab: target.masterTab,
+    sourceSpreadsheet: target.captainName,
+    cellsWritten: guarded.writes.length,
+    residentsTouched: new Set(guarded.writes.map((write) => write.residentId)).size,
+    conflictsLogged: recorded,
+    updatedCells,
+    revertAvailable: true,
+  };
+}
+
+/**
+ * Write one or more Conflict Inbox decisions (take the captain value) to the
+ * master copy. Each cell is snapshotted, so the whole batch is undoable.
+ */
+async function applyConflictCopy(ctx: JobContext): Promise<unknown> {
+  requireLive(ctx);
+  const conflictIds = Array.isArray(ctx.params.conflictIds)
+    ? ctx.params.conflictIds.map((id) => Number(id)).filter((id) => Number.isInteger(id) && id > 0)
+    : [];
+  if (conflictIds.length === 0) throw new Error('No conflicts were selected.');
+
+  const placeholders = conflictIds.map(() => '?').join(',');
+  const conflicts = db.all<ConflictRow>(
+    `SELECT id, status, "column", resident_id, existing_value, incoming_value, context_json
+     FROM conflicts WHERE id IN (${placeholders}) ORDER BY id`,
+    conflictIds
+  );
+  const open = conflicts.filter((conflict) => conflict.status === 'open');
+  if (open.length === 0) throw new Error('Those conflicts are no longer open.');
+
+  const groups = new Map<string, { context: ConflictContext; rows: ConflictRow[] }>();
+  for (const conflict of open) {
+    const context = parseConflictContext(conflict.context_json);
+    if (!context) {
+      ctx.log({
+        resident_id: conflict.resident_id,
+        column: conflict.column,
+        type: 'skip',
+        message: 'This conflict predates one-click resolution and has to be handled by hand.',
+      });
+      continue;
+    }
+    const key = `${context.spreadsheetId}\u0000${context.tabName}`;
+    const group = groups.get(key) ?? { context, rows: [] };
+    group.rows.push(conflict);
+    groups.set(key, group);
+  }
+  if (groups.size === 0) throw new Error('None of the selected conflicts carry enough context to apply.');
+
+  let written = 0;
+  let stale = 0;
+  let skipped = 0;
+
+  for (const group of groups.values()) {
+    const { context } = group;
+    assertCopyMaster(context.spreadsheetId);
+    ctx.reportProgress({ stage: 'reading', message: `Rechecking ${context.spreadsheetName} before writing.` });
+    const grid = await readGrid(context.spreadsheetId, context.tabName);
+    const headers = trimHeaders(grid[0]);
+
+    const applicable: ConflictRow[] = [];
+    for (const conflict of group.rows) {
+      const conflictContext = parseConflictContext(conflict.context_json);
+      const column = conflictContext?.column || conflict.column;
+      const colIndex = headers.indexOf(column);
+      const rowIndex = findRowByResidentId(grid, headers, conflict.resident_id);
+      const current = colIndex === -1 || rowIndex === -1 ? undefined : grid[rowIndex]?.[colIndex];
+      if (colIndex === -1 || rowIndex === -1) {
+        skipped++;
+        ctx.log({
+          spreadsheet: context.spreadsheetName,
+          resident_id: conflict.resident_id,
+          column,
+          type: 'skip',
+          message: 'That resident or column is no longer on the master copy.',
+        });
+        continue;
+      }
+      // Only apply when the master still holds the value we showed the Operator.
+      if (!cellValuesEqual(current ?? '', conflict.existing_value)) {
+        stale++;
+        ctx.log({
+          spreadsheet: context.spreadsheetName,
+          resident_id: conflict.resident_id,
+          column,
+          type: 'conflict',
+          existing_value: String(current ?? ''),
+          incoming_value: conflict.incoming_value,
+          message: 'The master value changed since this conflict was logged, so it was left alone.',
+        });
+        continue;
+      }
+      applicable.push(conflict);
+    }
+    if (applicable.length === 0) continue;
+
+    const guarded = planGuardedCellWrites(
+      grid,
+      applicable.map((conflict) => ({
+        residentId: conflict.resident_id,
+        column: parseConflictContext(conflict.context_json)?.column || conflict.column,
+        value: conflict.incoming_value,
+        policy: 'overwrite' as const,
+      }))
+    );
+    if (guarded.errors.length > 0) throw new Error(guarded.errors.join('; '));
+    for (const item of guarded.skipped) {
+      skipped++;
+      ctx.log({
+        spreadsheet: context.spreadsheetName,
+        resident_id: item.residentId,
+        column: item.column,
+        type: 'skip',
+        message: item.reason,
+      });
+    }
+    if (guarded.writes.length === 0) continue;
+
+    const insertSnapshots = db.transaction(() => {
+      for (const write of guarded.writes) {
+        db.run(
+          `INSERT INTO run_snapshots
+             (run_id, spreadsheet_id, spreadsheet_name, tab_name, operation, resident_id,
+              range_a1, before_json, after_json, metadata_json)
+           VALUES (?, ?, ?, ?, 'cell_update', ?, ?, ?, ?, ?)`,
+          [
+            ctx.runId,
+            context.spreadsheetId,
+            context.spreadsheetName,
+            context.tabName,
+            write.residentId,
+            google.a1Range(context.tabName, `${google.columnLetter(write.col - 1)}${write.row}`),
+            JSON.stringify(write.before ?? ''),
+            JSON.stringify(write.after ?? ''),
+            JSON.stringify({ kind: 'conflict_resolution', column: write.column }),
+          ]
+        );
+      }
+    });
+    insertSnapshots();
+
+    ctx.reportProgress({
+      stage: 'writing',
+      message: `Applying ${guarded.writes.length} approved captain value(s) to ${context.spreadsheetName}.`,
+    });
+    await google.updateValuesChunked(
+      context.spreadsheetId,
+      guarded.writes.map((write) => ({
+        range: google.a1Range(context.tabName, `${google.columnLetter(write.col - 1)}${write.row}`),
+        values: [[write.after]],
+      }))
+    );
+
+    const writtenKeys = new Set(guarded.writes.map((write) => `${write.residentId}\u0000${write.column}`));
+    const resolveConflicts = db.transaction(() => {
+      for (const conflict of applicable) {
+        const column = parseConflictContext(conflict.context_json)?.column || conflict.column;
+        if (!writtenKeys.has(`${conflict.resident_id}\u0000${column}`)) continue;
+        db.run("UPDATE conflicts SET status = 'resolved', resolution_notes = ? WHERE id = ?", [
+          `Captain value applied by run #${ctx.runId}.`,
+          conflict.id,
+        ]);
+      }
+    });
+    resolveConflicts();
+
+    for (const write of guarded.writes) {
+      written++;
+      ctx.log({
+        spreadsheet: context.spreadsheetName,
+        row: write.row,
+        column: write.column,
+        resident_id: write.residentId,
+        type: 'overwrite',
+        existing_value: String(write.before ?? ''),
+        incoming_value: String(write.after ?? ''),
+        message: 'Applied the captain value after Operator approval.',
+      });
+    }
+  }
+
+  return {
+    resolved: written,
+    stale,
+    skipped,
+    revertAvailable: written > 0,
+    message:
+      stale > 0
+        ? 'Some conflicts were skipped because the master value changed after they were logged.'
+        : `Applied ${written} approved captain value(s).`,
+  };
+}
+
+/**
+ * Log pull disagreements to the Conflict Inbox, refreshing an existing open
+ * entry for the same resident + column instead of piling up duplicates.
+ */
+function recordPullConflicts(runId: number, target: SafeCopyTarget, conflicts: PullCellChange[]): number {
+  if (conflicts.length === 0) return 0;
+  const existing = db.all<{ id: number; context_json: string }>(
+    "SELECT id, context_json FROM conflicts WHERE status = 'open'"
+  );
+  const openByKey = new Map<string, number>();
+  for (const row of existing) {
+    const context = parseConflictContext(row.context_json);
+    if (!context) continue;
+    openByKey.set(`${context.spreadsheetId}\u0000${context.residentId}\u0000${context.column}`, row.id);
+  }
+
+  let recorded = 0;
+  const write = db.transaction(() => {
+    for (const conflict of conflicts) {
+      const context: ConflictContext = {
+        kind: 'pull_to_master',
+        spreadsheetId: target.masterSpreadsheetId,
+        spreadsheetName: target.masterName,
+        tabName: target.masterTab,
+        residentId: conflict.residentId,
+        residentName: conflict.residentName,
+        column: conflict.column,
+        masterRow: conflict.masterRow,
+        masterValue: String(conflict.masterValue ?? ''),
+        captainValue: String(conflict.captainValue ?? ''),
+        sourceSpreadsheetId: target.captainSpreadsheetId,
+        sourceName: target.captainName,
+        sourceTab: target.captainTab,
+      };
+      const key = `${target.masterSpreadsheetId}\u0000${conflict.residentId}\u0000${conflict.column}`;
+      const existingId = openByKey.get(key);
+      if (existingId) {
+        db.run(
+          `UPDATE conflicts
+             SET run_id = ?, existing_value = ?, incoming_value = ?, context_json = ?
+           WHERE id = ?`,
+          [runId, context.masterValue, context.captainValue, JSON.stringify(context), existingId]
+        );
+      } else {
+        db.run(
+          `INSERT INTO conflicts
+             (run_id, spreadsheet, "row", "column", resident_id, existing_value, incoming_value, status, context_json)
+           VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?)`,
+          [
+            runId,
+            target.masterName,
+            String(conflict.masterRow),
+            conflict.column,
+            conflict.residentId,
+            context.masterValue,
+            context.captainValue,
+            JSON.stringify(context),
+          ]
+        );
+      }
+      recorded++;
+    }
+  });
+  write();
+  return recorded;
+}
+
+function parseConflictContext(json: string): ConflictContext | null {
+  try {
+    const value = JSON.parse(json || '{}') as Partial<ConflictContext>;
+    if (!value || value.kind !== 'pull_to_master' || !value.spreadsheetId || !value.tabName) return null;
+    return value as ConflictContext;
+  } catch {
+    return null;
+  }
+}
+
+function findRowByResidentId(grid: Grid, headers: string[], residentId: string): number {
+  const idCol = headers.indexOf('resident_id');
+  if (idCol === -1) return -1;
+  const wanted = residentId.trim();
+  for (let row = 1; row < grid.length; row++) {
+    if (String(grid[row]?.[idCol] ?? '').trim() === wanted) return row;
+  }
+  return -1;
+}
+
+function parseCellKeys(value: unknown): PullCellKey[] {
+  if (!Array.isArray(value)) throw new Error('Approved cells are missing.');
+  return value.map((item) => {
+    const raw = (item || {}) as Partial<PullCellKey>;
+    return {
+      residentId: String(raw.residentId || '').trim(),
+      column: String(raw.column || '').trim(),
+      value: String(raw.value ?? ''),
+    };
+  });
 }
 
 async function pushMissingCopy(ctx: JobContext): Promise<unknown> {
@@ -623,6 +1258,14 @@ async function revertCellCopy(ctx: JobContext): Promise<unknown> {
           plan.restores.map((restore) => restore.snapshotId)
         );
         restored += plan.restores.length;
+
+        // Putting a master value back means the captain still disagrees with
+        // it, so the conflict belongs in the inbox again.
+        const restoredIds = new Set(plan.restores.map((restore) => restore.snapshotId));
+        for (const row of dataSnapshots) {
+          if (!restoredIds.has(row.id) || metadataKind(row.metadata_json) !== 'conflict_resolution') continue;
+          reopenConflict(group.spreadsheetId, row.resident_id, metadataColumn(row.metadata_json), originalRunId);
+        }
       }
     }
 
@@ -1068,7 +1711,7 @@ function requireLive(ctx: JobContext): void {
 
 function assertCopyMaster(spreadsheetId: string): void {
   if (spreadsheetId === PRODUCTION_MASTER_SPREADSHEET_ID) {
-    throw new Error('Refusing to write zone enrichment to the production master. Use the master copy.');
+    throw new Error('Refusing to write to the production master. Use the master copy.');
   }
 }
 
@@ -1155,6 +1798,33 @@ function metadataColumn(json: string): string {
     return String(value.column || '').trim();
   } catch {
     return '';
+  }
+}
+
+function metadataKind(json: string): string {
+  try {
+    const value = JSON.parse(json || '{}') as { kind?: string };
+    return String(value.kind || '').trim();
+  } catch {
+    return '';
+  }
+}
+
+/** Re-open the conflict a resolution run had closed, if it is still resolved. */
+function reopenConflict(spreadsheetId: string, residentId: string, column: string, resolutionRunId: number): void {
+  if (!residentId || !column) return;
+  const candidates = db.all<{ id: number; context_json: string }>(
+    `SELECT id, context_json FROM conflicts
+     WHERE status = 'resolved' AND resident_id = ? AND "column" = ?`,
+    [residentId, column]
+  );
+  for (const candidate of candidates) {
+    const context = parseConflictContext(candidate.context_json);
+    if (!context || context.spreadsheetId !== spreadsheetId) continue;
+    db.run("UPDATE conflicts SET status = 'open', resolution_notes = ? WHERE id = ?", [
+      `Re-opened when run #${resolutionRunId} was undone.`,
+      candidate.id,
+    ]);
   }
 }
 

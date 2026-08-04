@@ -117,6 +117,9 @@ function undoWarning(type: string): string {
   if (type === 'move_residents_copy') {
     return 'SheetSmart will remove unchanged rows from the destination copy and restore unchanged rows to the source copy. Rows edited after the move are left in place and flagged for review.';
   }
+  if (type === 'pull_to_master_copy' || type === 'apply_conflict_copy') {
+    return 'SheetSmart will put back the master values that this run replaced, but only where the cell is still unchanged. Anything edited afterward is left in place and flagged for review.';
+  }
   return 'SheetSmart will remove only rows added by this run that are still unchanged. If anyone edited one of those rows afterward, it will be left in place and flagged for review.';
 }
 
@@ -127,17 +130,26 @@ function undoScope(type: string): string {
   if (type === 'move_residents_copy') {
     return 'This affects only the two captain copies used by the re-zone move playbook.';
   }
+  if (type === 'pull_to_master_copy' || type === 'apply_conflict_copy') {
+    return 'This affects only the master copy. Conflicts logged by the run stay in the Conflict inbox.';
+  }
+  if (type === 'pull_new_residents_copy') {
+    return 'This affects only the master copy, removing the resident rows this run added.';
+  }
   return 'This affects only the copied captain sheet used by the safe-copy playbook.';
 }
 
 function undoButtonLabel(type: string): string {
   if (type === 'enrich_zones_copy') return 'Undo the enriched cells';
   if (type === 'move_residents_copy') return 'Undo the resident moves';
+  if (type === 'pull_to_master_copy') return 'Undo the pulled values';
+  if (type === 'pull_new_residents_copy') return 'Undo the added residents';
+  if (type === 'apply_conflict_copy') return 'Undo the applied values';
   return 'Undo the appended rows';
 }
 
 function canUndo(run: RunSummary): boolean {
-  if (run.type === 'push_missing_copy') {
+  if (run.type === 'push_missing_copy' || run.type === 'pull_new_residents_copy') {
     return run.status === 'succeeded' && (run.unreverted_append_count ?? 0) > 0;
   }
   if (run.type === 'enrich_zones_copy') {
@@ -148,15 +160,23 @@ function canUndo(run: RunSummary): boolean {
       (run.unreverted_append_count ?? 0) + (run.unreverted_delete_count ?? 0);
     return (run.status === 'succeeded' || run.status === 'failed') && remaining > 0;
   }
+  if (run.type === 'pull_to_master_copy' || run.type === 'apply_conflict_copy') {
+    return (run.status === 'succeeded' || run.status === 'failed') && (run.unreverted_cell_count ?? 0) > 0;
+  }
   return false;
 }
 
 function isReverted(run: RunSummary): boolean {
   if ((run.snapshot_count ?? 0) === 0) return false;
-  if (run.type === 'push_missing_copy') return (run.unreverted_append_count ?? 0) === 0;
+  if (run.type === 'push_missing_copy' || run.type === 'pull_new_residents_copy') {
+    return (run.unreverted_append_count ?? 0) === 0;
+  }
   if (run.type === 'enrich_zones_copy') return (run.unreverted_cell_count ?? 0) === 0;
   if (run.type === 'move_residents_copy') {
     return (run.unreverted_append_count ?? 0) === 0 && (run.unreverted_delete_count ?? 0) === 0;
+  }
+  if (run.type === 'pull_to_master_copy' || run.type === 'apply_conflict_copy') {
+    return (run.unreverted_cell_count ?? 0) === 0;
   }
   return false;
 }
@@ -171,6 +191,11 @@ function runResult(run: RunSummary): string {
       const removed = typeof summary.deletedFromDest === 'number' ? summary.deletedFromDest : 0;
       return `${removed} removed / ${restored} restored`;
     }
+    if (typeof summary.cellsWritten === 'number') {
+      const logged = typeof summary.conflictsLogged === 'number' ? summary.conflictsLogged : 0;
+      return `${summary.cellsWritten.toLocaleString()} cell(s) pulled` + (logged ? `, ${logged} conflict(s) logged` : '');
+    }
+    if (typeof summary.resolved === 'number') return `${summary.resolved} conflict(s) applied`;
     if (typeof summary.appended === 'number') return `${summary.appended} row(s) added`;
     if (typeof summary.deleted === 'number') return `${summary.deleted} row(s) removed`;
     if (typeof summary.cellsFilled === 'number') {

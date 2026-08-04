@@ -3,22 +3,36 @@ import type { Deps } from '../types';
 import * as google from '../google';
 import * as jobs from '../jobs';
 import {
+  APPLY_CONFLICT_COPY_TASK,
   DEFAULT_ENRICHMENT_TAB,
   ENRICH_ZONES_COPY_TASK,
   MOVE_RESIDENTS_COPY_TASK,
   PRODUCTION_MASTER_SPREADSHEET_ID,
+  PULL_NEW_RESIDENTS_COPY_TASK,
+  PULL_TO_MASTER_COPY_TASK,
   PUSH_MISSING_COPY_TASK,
   REVERT_APPEND_COPY_TASK,
   REVERT_CELL_COPY_TASK,
   REVERT_MOVE_COPY_TASK,
+  pullCellKeys,
+  pullPoliciesForHeaders,
   type EnrichZonesPreviewPlan,
   type MoveCopyTarget,
   type MoveResidentsPreviewPlan,
+  type NewResidentsPreviewPlan,
+  type PullToMasterPreviewPlan,
   type PushMissingPreviewPlan,
   type SafeCopyTarget,
 } from '../executionTasks';
 import { planPushMissingResidents, trimHeaders, type Grid } from '../lib/mergeEngine';
 import { planGuardedAppends, planGuardedMoves } from '../lib/liveWriteEngine';
+import {
+  fingerprintPullCells,
+  newResidentCellKeys,
+  planPullNewResidents,
+  planPullToMaster,
+  type PullCellChange,
+} from '../lib/pullEngine';
 import { summarizePushMissing } from '../lib/previewEngine';
 import {
   fingerprintCaptainMoves,
@@ -263,6 +277,297 @@ export default function registerSafeExecutionRoutes(api: Router, { db }: Deps): 
       db.run("UPDATE runs SET status='failed', finished_at=datetime('now') WHERE id=?", [runId]);
       res.status(502).json({ error: friendlyError(error) });
     }
+  });
+
+  api.post('/execution/pull-to-master/preview', async (_req: Request, res: Response) => {
+    const target = loadTarget(db);
+    if (!target) return res.status(400).json({ error: 'Set up the safe copy target before running this preview.' });
+    if (target.masterSpreadsheetId === PRODUCTION_MASTER_SPREADSHEET_ID) {
+      return res.status(400).json({ error: 'This playbook only runs on the master copy, not the production master.' });
+    }
+
+    const runInsert = db.run(
+      `INSERT INTO runs (workflow_name, type, mode, status, started_at)
+       VALUES (?, 'preview_pull_to_master_copy', 'dry', 'running', datetime('now'))`,
+      ['Safe copy: pull captain edits into master']
+    );
+    const runId = Number(runInsert.lastInsertRowid);
+
+    try {
+      const [masterGrid, captainGrid] = await Promise.all([
+        readGrid(target.masterSpreadsheetId, target.masterTab),
+        readGrid(target.captainSpreadsheetId, target.captainTab),
+      ]);
+      const policies = pullPoliciesForHeaders(trimHeaders(masterGrid[0]));
+      const plan = planPullToMaster(masterGrid, captainGrid, { policies });
+      if (plan.errors.length > 0) throw new Error(plan.errors.join('; '));
+
+      const changes = [...plan.fills, ...plan.overwrites];
+      const expectedCells = pullCellKeys(changes);
+      const fingerprint = fingerprintPullCells(expectedCells);
+      const impact = {
+        headline:
+          changes.length > 0
+            ? `This would bring ${changes.length.toLocaleString()} captain value(s) into ${target.masterName} for ${
+                new Set(changes.map((change) => change.residentId)).size
+              } resident(s).`
+            : 'No captain values are ready to write into the master copy.',
+        detail: `${plan.conflicts.length.toLocaleString()} disagreement(s) will be logged to the Conflict inbox instead of overwriting the master. Writes go to the master copy only — never production.`,
+        cellsToWrite: changes.length,
+        fills: plan.fills.length,
+        overwrites: plan.overwrites.length,
+        conflicts: plan.conflicts.length,
+        unmatchedResidents: plan.unmatchedResidents.length,
+        columnsCompared: plan.columnsCompared.length,
+      };
+
+      const executionPlan: PullToMasterPreviewPlan = {
+        kind: 'pull_to_master_copy_preview',
+        target,
+        expectedCells,
+        fingerprint,
+        conflicts: plan.conflicts.length,
+        generatedAt: new Date().toISOString(),
+      };
+      db.run("UPDATE runs SET status='succeeded', finished_at=datetime('now'), summary_json=? WHERE id=?", [
+        JSON.stringify({ ...executionPlan, impact }),
+        runId,
+      ]);
+      res.json({
+        runId,
+        target,
+        impact,
+        cells: changes.map(describePullChange),
+        conflicts: plan.conflicts.slice(0, 100).map(describePullChange),
+        unmatchedResidents: plan.unmatchedResidents.slice(0, 50),
+        columnsCompared: plan.columnsCompared,
+        canApply: changes.length > 0 || plan.conflicts.length > 0,
+      });
+    } catch (error) {
+      db.run("UPDATE runs SET status='failed', finished_at=datetime('now') WHERE id=?", [runId]);
+      res.status(502).json({ error: friendlyError(error) });
+    }
+  });
+
+  api.post('/execution/pull-to-master/apply', (req: Request, res: Response) => {
+    const previewRunId = Number(req.body?.previewRunId);
+    if (!Number.isInteger(previewRunId) || previewRunId <= 0) {
+      return res.status(400).json({ error: 'A valid preview run is required.' });
+    }
+    if (req.body?.confirmed !== true) {
+      return res.status(400).json({ error: 'Please confirm the preview before running it live.' });
+    }
+
+    const preview = db.get<RunRow>('SELECT * FROM runs WHERE id = ?', [previewRunId]);
+    if (
+      !preview ||
+      preview.type !== 'preview_pull_to_master_copy' ||
+      preview.mode !== 'dry' ||
+      preview.status !== 'succeeded'
+    ) {
+      return res.status(400).json({ error: 'That preview is not available for a live run.' });
+    }
+    const plan = parsePullPreviewPlan(preview.summary_json);
+    if (!plan) return res.status(400).json({ error: 'That preview does not contain a valid pull plan.' });
+    if (plan.appliedRunId) {
+      return res.status(409).json({ error: `That preview was already approved as live run #${plan.appliedRunId}.` });
+    }
+    if (plan.target.masterSpreadsheetId === PRODUCTION_MASTER_SPREADSHEET_ID) {
+      return res.status(400).json({ error: 'Refusing to write to the production master.' });
+    }
+
+    const approvedKeys = Array.isArray(req.body?.cells)
+      ? (req.body.cells as unknown[]).map((cell) => {
+          const raw = (cell || {}) as { residentId?: unknown; column?: unknown };
+          return `${String(raw.residentId || '').trim()}\u0000${String(raw.column || '').trim()}`;
+        })
+      : plan.expectedCells.map((cell) => `${cell.residentId}\u0000${cell.column}`);
+    const wanted = new Set(approvedKeys);
+    const approvedCells = plan.expectedCells.filter((cell) => wanted.has(`${cell.residentId}\u0000${cell.column}`));
+    if (approvedCells.length !== wanted.size) {
+      return res.status(400).json({ error: 'One or more selected cells were not part of this preview.' });
+    }
+    if (approvedCells.length === 0 && plan.conflicts === 0) {
+      return res.status(400).json({ error: 'The preview found nothing to write or log.' });
+    }
+
+    const fingerprint = fingerprintPullCells(approvedCells);
+    const queued = jobs.enqueue({
+      workflowName: 'Safe copy: pull captain edits into master',
+      type: PULL_TO_MASTER_COPY_TASK,
+      mode: 'live',
+      params: {
+        previewRunId,
+        target: plan.target,
+        approvedCells,
+        fingerprint,
+      },
+    });
+    plan.appliedRunId = queued.runId;
+    plan.expectedCells = approvedCells;
+    plan.fingerprint = fingerprint;
+    const stored = { ...safeJson(preview.summary_json), ...plan };
+    db.run('UPDATE runs SET summary_json = ? WHERE id = ?', [JSON.stringify(stored), previewRunId]);
+    res.status(202).json({ ...queued, status: 'queued' });
+  });
+
+  api.post('/execution/new-residents/preview', async (_req: Request, res: Response) => {
+    const target = loadTarget(db);
+    if (!target) return res.status(400).json({ error: 'Set up the safe copy target before running this preview.' });
+    if (target.masterSpreadsheetId === PRODUCTION_MASTER_SPREADSHEET_ID) {
+      return res.status(400).json({ error: 'This playbook only runs on the master copy, not the production master.' });
+    }
+
+    const runInsert = db.run(
+      `INSERT INTO runs (workflow_name, type, mode, status, started_at)
+       VALUES (?, 'preview_pull_new_residents_copy', 'dry', 'running', datetime('now'))`,
+      ['Safe copy: add captain-created residents to master']
+    );
+    const runId = Number(runInsert.lastInsertRowid);
+
+    try {
+      const [masterGrid, captainGrid] = await Promise.all([
+        readGrid(target.masterSpreadsheetId, target.masterTab),
+        readGrid(target.captainSpreadsheetId, target.captainTab),
+      ]);
+      const plan = planPullNewResidents(masterGrid, captainGrid);
+      if (plan.errors.length > 0) throw new Error(plan.errors.join('; '));
+
+      const flagged = plan.candidates.filter((candidate) => candidate.risk !== 'none');
+      const clean = plan.candidates.length - flagged.length;
+      const impact = {
+        headline:
+          plan.candidates.length > 0
+            ? `${plan.candidates.length} resident(s) on ${target.captainName} are not on the master copy. ${clean} look new; ${flagged.length} may already exist under a different resident_id.`
+            : `Every resident on ${target.captainName} already has a row on the master copy.`,
+        detail:
+          'Sharing an address (APN) is normal and is never treated as a duplicate. A row is flagged when the same person appears again: the same name at the same parcel, or a re-used email. Flagged rows start unticked.',
+        candidates: plan.candidates.length,
+        clean,
+        likelyDuplicates: plan.candidates.filter((candidate) => candidate.risk === 'likely').length,
+        possibleDuplicates: plan.candidates.filter((candidate) => candidate.risk === 'possible').length,
+        droppedColumns: plan.columnsOnlyOnCaptain.length,
+      };
+
+      const executionPlan: NewResidentsPreviewPlan = {
+        kind: 'pull_new_residents_copy_preview',
+        target,
+        expectedRows: newResidentCellKeys(plan.candidates),
+        fingerprint: plan.fingerprint,
+        flaggedCount: flagged.length,
+        generatedAt: new Date().toISOString(),
+      };
+      db.run("UPDATE runs SET status='succeeded', finished_at=datetime('now'), summary_json=? WHERE id=?", [
+        JSON.stringify({ ...executionPlan, impact }),
+        runId,
+      ]);
+      res.json({
+        runId,
+        target,
+        impact,
+        residents: plan.candidates.map((candidate) => ({
+          residentId: candidate.residentId,
+          residentName: candidate.residentName,
+          captainRow: candidate.captainRow,
+          property: candidate.property,
+          filledColumns: candidate.filledColumns,
+          risk: candidate.risk,
+          riskReason: candidate.riskReason,
+          matchedResidentId: candidate.matchedResidentId,
+          missingRequired: candidate.missingRequired,
+        })),
+        skipped: plan.skipped,
+        columnsOnlyOnCaptain: plan.columnsOnlyOnCaptain,
+        canApply: plan.candidates.length > 0,
+      });
+    } catch (error) {
+      db.run("UPDATE runs SET status='failed', finished_at=datetime('now') WHERE id=?", [runId]);
+      res.status(502).json({ error: friendlyError(error) });
+    }
+  });
+
+  api.post('/execution/new-residents/apply', (req: Request, res: Response) => {
+    const previewRunId = Number(req.body?.previewRunId);
+    if (!Number.isInteger(previewRunId) || previewRunId <= 0) {
+      return res.status(400).json({ error: 'A valid preview run is required.' });
+    }
+    if (req.body?.confirmed !== true) {
+      return res.status(400).json({ error: 'Please confirm the preview before running it live.' });
+    }
+
+    const preview = db.get<RunRow>('SELECT * FROM runs WHERE id = ?', [previewRunId]);
+    if (
+      !preview ||
+      preview.type !== 'preview_pull_new_residents_copy' ||
+      preview.mode !== 'dry' ||
+      preview.status !== 'succeeded'
+    ) {
+      return res.status(400).json({ error: 'That preview is not available for a live run.' });
+    }
+    const plan = parseNewResidentsPreviewPlan(preview.summary_json);
+    if (!plan) return res.status(400).json({ error: 'That preview does not contain a valid plan.' });
+    if (plan.appliedRunId) {
+      return res.status(409).json({ error: `That preview was already approved as live run #${plan.appliedRunId}.` });
+    }
+    if (plan.target.masterSpreadsheetId === PRODUCTION_MASTER_SPREADSHEET_ID) {
+      return res.status(400).json({ error: 'Refusing to write to the production master.' });
+    }
+
+    const approvedIds = Array.isArray(req.body?.residentIds)
+      ? (req.body.residentIds as unknown[]).map((id) => String(id).trim()).filter(Boolean)
+      : [];
+    if (approvedIds.length === 0) {
+      return res.status(400).json({ error: 'Tick at least one resident to add.' });
+    }
+    const wanted = new Set(approvedIds);
+    const approvedRows = plan.expectedRows.filter((row) => wanted.has(row.residentId));
+    if (approvedRows.length !== wanted.size) {
+      return res.status(400).json({ error: 'One or more selected residents were not part of this preview.' });
+    }
+
+    const fingerprint = fingerprintPullCells(approvedRows);
+    const queued = jobs.enqueue({
+      workflowName: 'Safe copy: add captain-created residents to master',
+      type: PULL_NEW_RESIDENTS_COPY_TASK,
+      mode: 'live',
+      params: {
+        previewRunId,
+        target: plan.target,
+        expectedResidentIds: approvedRows.map((row) => row.residentId),
+        fingerprint,
+      },
+    });
+    plan.appliedRunId = queued.runId;
+    plan.expectedRows = approvedRows;
+    plan.fingerprint = fingerprint;
+    const stored = { ...safeJson(preview.summary_json), ...plan };
+    db.run('UPDATE runs SET summary_json = ? WHERE id = ?', [JSON.stringify(stored), previewRunId]);
+    res.status(202).json({ ...queued, status: 'queued' });
+  });
+
+  api.post('/conflicts/apply', (req: Request, res: Response) => {
+    if (req.body?.confirmed !== true) {
+      return res.status(400).json({ error: 'Please confirm before writing captain values to the master copy.' });
+    }
+    const conflictIds = Array.isArray(req.body?.conflictIds)
+      ? (req.body.conflictIds as unknown[]).map((id) => Number(id)).filter((id) => Number.isInteger(id) && id > 0)
+      : [];
+    if (conflictIds.length === 0) return res.status(400).json({ error: 'Select at least one conflict to apply.' });
+
+    const placeholders = conflictIds.map(() => '?').join(',');
+    const open = db.all<{ id: number }>(
+      `SELECT id FROM conflicts WHERE id IN (${placeholders}) AND status = 'open'`,
+      conflictIds
+    );
+    if (open.length === 0) return res.status(409).json({ error: 'Those conflicts are no longer open.' });
+
+    const queued = jobs.enqueue({
+      workflowName: 'Conflict inbox: apply captain values',
+      type: APPLY_CONFLICT_COPY_TASK,
+      mode: 'live',
+      params: { conflictIds: open.map((conflict) => conflict.id) },
+    });
+    res.status(202).json({ ...queued, status: 'queued' });
   });
 
   api.get('/execution/move-target', (_req: Request, res: Response) => {
@@ -520,7 +825,7 @@ export default function registerSafeExecutionRoutes(api: Router, { db }: Deps): 
     }
     let revertType = '';
     let remaining = 0;
-    if (original.type === PUSH_MISSING_COPY_TASK) {
+    if (original.type === PUSH_MISSING_COPY_TASK || original.type === PULL_NEW_RESIDENTS_COPY_TASK) {
       if (original.status !== 'succeeded') {
         return res.status(409).json({ error: 'Wait for the live run to finish before reverting it.' });
       }
@@ -533,6 +838,17 @@ export default function registerSafeExecutionRoutes(api: Router, { db }: Deps): 
         )?.n || 0;
     } else if (original.type === ENRICH_ZONES_COPY_TASK) {
       // Failed enrichments may still have written headers/partial cells; allow undo.
+      if (original.status !== 'succeeded' && original.status !== 'failed') {
+        return res.status(409).json({ error: 'Wait for the live run to finish before reverting it.' });
+      }
+      revertType = REVERT_CELL_COPY_TASK;
+      remaining =
+        db.get<{ n: number }>(
+          `SELECT COUNT(*) AS n FROM run_snapshots
+           WHERE run_id = ? AND operation = 'cell_update' AND reverted_by_run_id IS NULL`,
+          [originalRunId]
+        )?.n || 0;
+    } else if (original.type === PULL_TO_MASTER_COPY_TASK || original.type === APPLY_CONFLICT_COPY_TASK) {
       if (original.status !== 'succeeded' && original.status !== 'failed') {
         return res.status(409).json({ error: 'Wait for the live run to finish before reverting it.' });
       }
@@ -556,7 +872,8 @@ export default function registerSafeExecutionRoutes(api: Router, { db }: Deps): 
         )?.n || 0;
     } else {
       return res.status(400).json({
-        error: 'Only safe-copy append, zone-enrichment, or resident-move runs can be reverted here.',
+        error:
+          'Only safe-copy append, zone-enrichment, resident-move, pull, or conflict-resolution runs can be reverted here.',
       });
     }
 
@@ -667,6 +984,44 @@ function parseEnrichPreviewPlan(json: string): EnrichZonesPreviewPlan | null {
     return null;
   }
   return value as unknown as EnrichZonesPreviewPlan;
+}
+
+function parsePullPreviewPlan(json: string): PullToMasterPreviewPlan | null {
+  const value = safeJson(json);
+  if (
+    value.kind !== 'pull_to_master_copy_preview' ||
+    !value.target ||
+    typeof value.fingerprint !== 'string' ||
+    !Array.isArray(value.expectedCells)
+  ) {
+    return null;
+  }
+  return value as unknown as PullToMasterPreviewPlan;
+}
+
+function parseNewResidentsPreviewPlan(json: string): NewResidentsPreviewPlan | null {
+  const value = safeJson(json);
+  if (
+    value.kind !== 'pull_new_residents_copy_preview' ||
+    !value.target ||
+    typeof value.fingerprint !== 'string' ||
+    !Array.isArray(value.expectedRows)
+  ) {
+    return null;
+  }
+  return value as unknown as NewResidentsPreviewPlan;
+}
+
+function describePullChange(change: PullCellChange) {
+  return {
+    residentId: change.residentId,
+    residentName: change.residentName,
+    column: change.column,
+    masterRow: change.masterRow,
+    masterValue: String(change.masterValue ?? ''),
+    captainValue: String(change.captainValue ?? ''),
+    policy: change.policy,
+  };
 }
 
 function loadMoveTarget(db: Deps['db']): MoveCopyTarget | null {

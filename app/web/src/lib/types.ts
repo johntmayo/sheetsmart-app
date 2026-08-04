@@ -385,6 +385,72 @@ export interface MoveResidentsPreviewResponse {
   canApply: boolean;
 }
 
+export interface PullCellRow {
+  residentId: string;
+  residentName: string;
+  column: string;
+  masterRow: number;
+  masterValue: string;
+  captainValue: string;
+  policy: 'fill_blank' | 'overwrite' | 'conflict' | 'never';
+}
+
+export interface PullToMasterImpact {
+  headline: string;
+  detail: string;
+  cellsToWrite: number;
+  fills: number;
+  overwrites: number;
+  conflicts: number;
+  unmatchedResidents: number;
+  columnsCompared: number;
+}
+
+export interface PullToMasterPreviewResponse {
+  runId: number;
+  target: SafeCopyTarget;
+  impact: PullToMasterImpact;
+  cells: PullCellRow[];
+  conflicts: PullCellRow[];
+  unmatchedResidents: Array<{ residentId: string; residentName: string; captainRow: number }>;
+  columnsCompared: string[];
+  canApply: boolean;
+}
+
+export type DuplicateRisk = 'likely' | 'possible' | 'none';
+
+export interface NewResidentRow {
+  residentId: string;
+  residentName: string;
+  captainRow: number;
+  property: string;
+  filledColumns: number;
+  risk: DuplicateRisk;
+  riskReason: string;
+  matchedResidentId: string;
+  missingRequired: string[];
+}
+
+export interface NewResidentsImpact {
+  headline: string;
+  detail: string;
+  candidates: number;
+  clean: number;
+  likelyDuplicates: number;
+  possibleDuplicates: number;
+  droppedColumns: number;
+}
+
+export interface NewResidentsPreviewResponse {
+  runId: number;
+  target: SafeCopyTarget;
+  impact: NewResidentsImpact;
+  residents: NewResidentRow[];
+  skipped: Array<{ residentId: string; column: string; reason: string }>;
+  columnsOnlyOnCaptain: string[];
+  canApply: boolean;
+}
+
 export interface QueuedRunResponse {
   runId: number;
   jobId: number;

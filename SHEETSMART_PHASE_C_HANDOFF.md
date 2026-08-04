@@ -1,5 +1,110 @@
 # SheetSmart — Phase C Handoff & Continuation Prompt (Safe Execution + Undo)
 
+## August 3, 2026 progress update — captain-created residents can now reach the master (with person-level duplicate detection)
+
+Captains genuinely add new people to their sheets — the Operator confirmed this
+is expected, not drift. SheetSmart can now bring those people onto the master as
+new rows, but only past a duplicate check.
+
+The rule that matters, and why: **a shared APN is never a duplicate signal.**
+Several residents legitimately live at one address, so parcel identity says
+nothing about person identity. Detection therefore keys on the person:
+
+- `likely` — same name at the same parcel, or a re-used email address (either
+  against the master, or against another row in the same batch).
+- `possible` — same name on the master but at a *different* parcel.
+- `none` — no person-level match.
+
+What was built:
+- `planPullNewResidents` in `app/src/lib/pullEngine.ts` — pure planner. Maps
+  captain rows onto master headers by header name (captain-only columns are
+  dropped and reported), classifies duplicate risk, refuses rows with no
+  `resident_id`, and fingerprints candidate rows for the stale-preview check.
+- Fifth reversible live playbook: **Add captain-created residents to the master
+  copy**. Rows carrying any duplicate warning **start unticked**, so adding a
+  possible duplicate is always a deliberate act; the confirm line names how many
+  flagged rows are included.
+- Task `pull_new_residents_copy` — re-reads both sheets, re-plans, rejects the
+  run if the approved subset's fingerprint moved, then snapshots each row as
+  `row_append` and appends via `google.appendValues`. Reverts through the
+  existing `revert_append_copy`. Production master ID hard-refused.
+- Flagged rows that are approved anyway get a second `sensitive` log line naming
+  the warning and the matched `resident_id`, so the audit trail records the
+  judgment call.
+
+Verified on the real data (Test Copy of Zone 1 → Test Copy of Master Data File,
+tab `Zones Join 2026-07-29`) — the same 16 residents from the pull preview:
+- classification: **11 clean, 3 likely duplicates, 2 possible**. Michelle Dohl
+  and Gregory McKenna, who share 570 Punahou St / APN 5841-006-012, were
+  correctly *not* flagged. Matthew Pearce and Christa Chase were flagged as
+  same-name-same-parcel; the two Rex Mayreis rows flagged each other in-batch.
+- live run **#36**: approved exactly **1** clean resident (Rene Rebollo Senior),
+  appended at row 34557.
+- re-preview **#39**: candidates 16 → **15**, confirming the master now knows him.
+- undo **#40**: 1 row deleted, 0 conflicts. Re-preview **#41** returned to
+  **16 / 11 / 3 / 2** — the master copy is byte-identical to its starting state.
+
+Read-only helper scripts added: `app/scripts/preview-new-residents.ts` (prints
+the classification of every candidate with its reason) and
+`app/scripts/new-residents-count.ps1`. Live smoke:
+`app/scripts/new-residents-smoke.ps1 -Count 1`, which only ever approves
+unflagged candidates.
+
+Still true: nothing outside the two safe copies has been written, and folder-wide
+execution remains unbuilt.
+
+Tests: **82/82 pass**, 0 skipped. Typecheck + both builds clean.
+
+## August 3, 2026 progress update — Use Case 2 built and verified (pull → Conflict Inbox → undo)
+
+Captain edits can now flow back into the master copy, with every disagreement
+parked in the Conflict Inbox for a human decision.
+
+What was built:
+- Pure planner `app/src/lib/pullEngine.ts` — `planPullToMaster` compares a
+  captain sheet to the master by `resident_id`, runs every proposed cell through
+  `writeGuard`, and returns fills / overwrites / conflicts / skips /
+  unmatched residents. Policies come from the Field Dictionary's
+  `default_policy`; **unlisted columns default to conflict-only**. It never
+  appends new master rows (rows only on a captain sheet are reported).
+- Fourth reversible live playbook: **Pull captain edits into the master copy**
+  (Playbooks page). Preview → per-cell checkbox approval → re-read +
+  fingerprint check → snapshot → guarded write → Runs → Undo. It reuses the
+  existing `safe_copy_execution_target`, so there is no new config to fill in.
+- Conflict Inbox is now actionable: conflicts are written with a
+  `context_json` payload (spreadsheet, tab, row, column, both values), and
+  **Use captain value for N selected** enqueues a snapshotted live run that
+  writes those values to the master copy. Undoing that run puts the master
+  value back *and re-opens the conflict*.
+- Tasks: `pull_to_master_copy`, `apply_conflict_copy`; both revert through the
+  existing `revert_cell_copy`. Production master ID is hard-refused on both.
+- Additive DB migration helper in `db.ts` (`applyColumnMigrations`) added
+  `conflicts.context_json` without touching existing rows.
+
+Verified live on the copies (Test Copy of Zone 1 → Test Copy of Master Data
+File, tab `Zones Join 2026-07-29`):
+- preview **#29**: 358 fills, 0 overwrites, 293 conflicts, 16 residents not on
+  the master.
+- live pull **#30**: deliberately approved **2** cells → 2 written, 293
+  conflicts logged.
+- conflict apply **#31**: `Damage` "Total Loss" → "Partial Loss" for one
+  resident; open conflicts 293 → 292.
+- undo **#32** (1 cell restored, conflict re-opened → 293 again) and undo
+  **#33** (2 cells restored).
+- re-preview **#34** returned exactly the pre-test numbers (358 / 293 / 16),
+  proving the master copy was left byte-identical to its starting state.
+
+Manual smoke scripts live in `app/scripts/` (`pull-smoke.ps1`,
+`conflict-smoke.ps1`, `undo-run.ps1`); they read the admin password from
+`SHEETSMART_ADMIN_PASSWORD` or `app/.env`, never from source.
+
+Open item for the Operator: the inbox currently holds **293 real open
+conflicts** from that first pull preview against Zone 1. They are genuine
+disagreements between the Zone 1 captain copy and the master copy — triage,
+mark resolved, or apply them as you see fit.
+
+Tests: **73/73 pass**, 0 skipped. Typecheck + both builds clean.
+
 ## August 3, 2026 progress update — live move verified + UX/NC fixups
 
 Operator verified the copies-only move playbook end-to-end with a synthetic

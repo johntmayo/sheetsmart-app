@@ -179,10 +179,28 @@ export function init(): Database.Database {
   db.pragma('journal_mode = WAL');
   db.pragma('foreign_keys = ON');
   db.exec(SCHEMA);
+  applyColumnMigrations();
 
   reconcileInterruptedJobsOnStartup();
   seedDictionaryIfEmpty();
   return db;
+}
+
+// Additive column migrations for databases created by an earlier build. Each
+// entry must be safe to apply to an existing database with live data.
+function applyColumnMigrations(): void {
+  const conn = getDb();
+  const migrations: Array<{ table: string; column: string; definition: string }> = [
+    // Where a conflict came from (spreadsheet, tab, row, column), so the
+    // Conflict Inbox can write the approved value back to the exact cell.
+    { table: 'conflicts', column: 'context_json', definition: "TEXT NOT NULL DEFAULT '{}'" },
+  ];
+
+  for (const migration of migrations) {
+    const columns = conn.prepare(`PRAGMA table_info(${migration.table})`).all() as Array<{ name: string }>;
+    if (columns.some((column) => column.name === migration.column)) continue;
+    conn.exec(`ALTER TABLE ${migration.table} ADD COLUMN ${migration.column} ${migration.definition}`);
+  }
 }
 
 // Populate the Field Dictionary from the real master schema on first run. Only

@@ -66,17 +66,27 @@ Plus **Phase B and the first Phase-C vertical slice**:
   (current sheet/zone → Mapbox-computed zone) → approve selected rows →
   guarded append to destination + identity-based delete from source → Undo
   from Runs (restores unchanged rows; edited rows become conflicts).
+- A **copies-only pull playbook**: compare a captain copy to the master copy by
+  `resident_id` → preview each proposed value → approve cell by cell → fill
+  blank master cells (only Field Dictionary `overwrite` columns may replace a
+  value) → Undo from Runs. Everything else that disagrees is logged to the
+  **Conflict inbox**, where **Use captain value** writes the approved value as
+  its own snapshotted, undoable run.
+- A **master-copy-only playbook for captain-created residents**: finds people on
+  a captain sheet with no master row, screens each one for person-level
+  duplicates (same name at the same parcel, or a re-used email — a shared APN
+  alone is normal and never flagged), starts flagged rows unticked, then appends
+  only the approved rows → Undo from Runs.
 - Pre-write `run_snapshots`, identity-based execution rechecks, durable append/
   undo logs, and undo that preserves rows edited after the original run.
-- Verified end-to-end on July 31, 2026 with a synthetic resident: append and
-  undo both succeeded, then the copies were restored to their starting state.
-  Master-copy enrichment was also verified end-to-end. The move playbook is
-  built and unit-tested; live verification waits on a second captain copy in
-  the testing folder.
+- Verified end-to-end on July 31 and August 3, 2026: append, master-copy
+  enrichment, captain-sheet moves, pull + conflict resolution, and adding
+  captain-created residents each ran live on copies and were undone, leaving the
+  copies in their starting state.
 
-**Still gated:** folder-wide live execution, production-sheet writes,
-pull-to-master + conflict resolutions, and destructive schema operations.
-Captain-sheet moves stay on copies until the Operator watches a live run.
+**Still gated:** folder-wide live execution, production-sheet writes, and
+destructive schema operations. Every live playbook stays on copies until the
+Operator watches a live run.
 
 ---
 
@@ -218,7 +228,7 @@ app/
 │   ├── db.ts                  SQLite + full schema (thin, swappable)
 │   ├── auth.ts                admin password + signed session cookie
 │   ├── google.ts              service-account client, retry, batched read/write helpers
-│   ├── executionTasks.ts      copies-only append + identity-based undo jobs
+│   ├── executionTasks.ts      copies-only live jobs (append, enrich, move, pull) + undo
 │   ├── jobs.ts                in-process job queue (restart-durable)
 │   ├── dictionarySeed.ts      the 52-field Field Dictionary seed
 │   ├── types.ts               shared backend types (injected Deps, etc.)
@@ -227,6 +237,8 @@ app/
 │   │   ├── columns.ts         fuzzy column matcher + zone detection (ported)
 │   │   ├── writeGuard.ts      THE safety decision point (ported, tested)
 │   │   ├── mergeEngine.ts     pure merge/append planners (ported, tested)
+│   │   ├── pullEngine.ts      pure captain→master planners (fills vs conflicts; new
+│   │   │                      residents with person-level duplicate detection, tested)
 │   │   └── liveWriteEngine.ts fresh identity rechecks + safe revert planning
 │   └── routes/                auth, status, connections, workflows, settings, runs, audit, dictionary
 ├── dist/                      compiled backend output (git-ignored; `npm run build`)

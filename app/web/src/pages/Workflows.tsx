@@ -7,8 +7,10 @@ import type {
   EnrichZonesPreviewResponse,
   MoveCopyTargetResponse,
   MoveResidentsPreviewResponse,
+  NewResidentsPreviewResponse,
   PreviewPlaybook,
   PreviewResponse,
+  PullToMasterPreviewResponse,
   QueuedRunResponse,
   SafeCopyPreviewResponse,
   SafeCopyTargetResponse,
@@ -20,7 +22,7 @@ import { EmptyState, ErrorState, Modal, SectionHead, Spinner } from '../componen
 // Playbooks whose guided dry-run preview isn't wired yet (later phases). Shown so
 // the Operator sees the full map of what's coming.
 const UPCOMING = [
-  { title: 'Bring in what captains have added', engine: 'pull missing rows / pull data ← folder' },
+  { title: 'Run any playbook across the whole captain folder', engine: 'folder-wide execution (gated)' },
   { title: 'Fix / retire a column everywhere', engine: 'rename / delete (destructive, gated)' },
 ];
 
@@ -68,6 +70,8 @@ export function Workflows() {
       <SafeCopyPlaybook />
       <EnrichZonesPlaybook />
       <MoveResidentsPlaybook />
+      <PullToMasterPlaybook />
+      <NewResidentsPlaybook />
 
       <div className="section-head" style={{ marginTop: 32 }}>
         <h2>Read-only previews</h2>
@@ -884,6 +888,472 @@ function MoveResidentsPlaybook() {
                 disabled={!confirmed || applying || selectedCount === 0}
               >
                 {applying ? 'Starting safely…' : `Move ${selectedCount} approved resident(s)`}
+              </button>
+            )}
+          </div>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+function PullToMasterPlaybook() {
+  const { data, loading, error } = useAsync<SafeCopyTargetResponse>(() => api.get('/execution/copy-target'));
+  const [previewing, setPreviewing] = useState(false);
+  const [preview, setPreview] = useState<PullToMasterPreviewResponse | null>(null);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [confirmed, setConfirmed] = useState(false);
+  const [applying, setApplying] = useState(false);
+  const [queued, setQueued] = useState<QueuedRunResponse | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+
+  const cellKey = (cell: { residentId: string; column: string }) => `${cell.residentId}\u0000${cell.column}`;
+
+  async function runPreview() {
+    setPreviewing(true);
+    setActionError(null);
+    setPreview(null);
+    setQueued(null);
+    setConfirmed(false);
+    try {
+      const result = await api.post<PullToMasterPreviewResponse>('/execution/pull-to-master/preview');
+      setPreview(result);
+      setSelected(new Set(result.cells.map(cellKey)));
+    } catch (e) {
+      setActionError(e instanceof ApiError ? e.message : String(e));
+    } finally {
+      setPreviewing(false);
+    }
+  }
+
+  function toggle(cell: { residentId: string; column: string }) {
+    const key = cellKey(cell);
+    const next = new Set(selected);
+    if (next.has(key)) next.delete(key);
+    else next.add(key);
+    setSelected(next);
+  }
+
+  async function applyPreview() {
+    if (!preview || !confirmed) return;
+    setApplying(true);
+    setActionError(null);
+    try {
+      setQueued(
+        await api.post<QueuedRunResponse>('/execution/pull-to-master/apply', {
+          previewRunId: preview.runId,
+          confirmed: true,
+          cells: preview.cells
+            .filter((cell) => selected.has(cellKey(cell)))
+            .map((cell) => ({ residentId: cell.residentId, column: cell.column })),
+        })
+      );
+    } catch (e) {
+      setActionError(e instanceof ApiError ? e.message : String(e));
+    } finally {
+      setApplying(false);
+    }
+  }
+
+  if (loading) return null;
+  const target = data?.target;
+  const selectedCount = preview ? preview.cells.filter((cell) => selected.has(cellKey(cell))).length : 0;
+
+  return (
+    <div className="card" style={{ borderColor: 'var(--golden-orange)', marginTop: 20 }}>
+      <div className="eyebrow">Fourth reversible live playbook · copies only</div>
+      <h3 style={{ marginTop: 6 }}>Pull captain edits into the master copy</h3>
+      <p className="reading-copy" style={{ marginBottom: 12 }}>
+        Compares the captain copy against the master copy by <span className="mono">resident_id</span> and brings
+        captain-entered values back. Blank master cells are filled; anywhere the two disagree is logged to the{' '}
+        <a href="/conflicts">Conflict inbox</a> instead of being overwritten. Every write is snapshotted and undoable.
+      </p>
+      {error && <ErrorState message={error} />}
+      {!target ? (
+        <p className="reading-copy">Configure the safe-copy target above first (same master copy and captain copy).</p>
+      ) : (
+        <>
+          <div className="callout info" style={{ marginBottom: 14 }}>
+            <strong>{target.captainName}</strong> ({target.captainTab}) → <strong>{target.masterName}</strong> (
+            {target.masterTab})
+            <br />
+            Fill blanks only, unless the Field Dictionary marks a column <span className="mono">overwrite</span>
+          </div>
+          <div className="btn-row">
+            <button className="btn highlight" onClick={runPreview} disabled={previewing}>
+              {previewing ? 'Comparing sheets…' : 'Preview captain edits'}
+            </button>
+          </div>
+        </>
+      )}
+      {actionError && (
+        <div className="field-error" style={{ marginTop: 12 }}>
+          {actionError}
+        </div>
+      )}
+
+      {preview && (
+        <Modal title="Approve captain edits into the master copy" onClose={() => setPreview(null)} wide>
+          <div className="callout">
+            <strong>{preview.impact.headline}</strong>
+            <div style={{ marginTop: 6 }}>{preview.impact.detail}</div>
+          </div>
+          <div className="card-grid" style={{ marginTop: 16 }}>
+            <Metric value={preview.impact.fills} label="Blank cells to fill" />
+            <Metric value={preview.impact.overwrites} label="Approved overwrites" alert={preview.impact.overwrites > 0} />
+            <Metric value={preview.impact.conflicts} label="Conflicts to log" alert={preview.impact.conflicts > 0} />
+            <Metric value={preview.impact.unmatchedResidents} label="Not on master (left alone)" />
+          </div>
+
+          {preview.cells.length > 0 && (
+            <>
+              <p className="reading-copy">
+                Untick anything you don't want written. {selectedCount} of {preview.cells.length} cell(s) selected.
+              </p>
+              <div className="table-wrap">
+                <table className="data">
+                  <thead>
+                    <tr>
+                      <th />
+                      <th>Resident</th>
+                      <th className="mono">resident_id</th>
+                      <th>Column</th>
+                      <th>Master now</th>
+                      <th>Captain value</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {preview.cells.map((cell) => (
+                      <tr key={cellKey(cell)}>
+                        <td>
+                          <input
+                            type="checkbox"
+                            checked={selected.has(cellKey(cell))}
+                            onChange={() => toggle(cell)}
+                            disabled={Boolean(queued)}
+                          />
+                        </td>
+                        <td>{cell.residentName || '—'}</td>
+                        <td className="mono">{cell.residentId}</td>
+                        <td>{cell.column}</td>
+                        <td className="truncate">{cell.masterValue || <em>blank</em>}</td>
+                        <td className="truncate">{cell.captainValue}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </>
+          )}
+
+          {preview.conflicts.length > 0 && (
+            <>
+              <p className="reading-copy">
+                These {preview.impact.conflicts} disagreement(s) will be logged for review, not written:
+              </p>
+              <div className="table-wrap">
+                <table className="data">
+                  <thead>
+                    <tr>
+                      <th>Resident</th>
+                      <th>Column</th>
+                      <th>Master keeps</th>
+                      <th>Captain says</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {preview.conflicts.map((cell) => (
+                      <tr key={cellKey(cell)}>
+                        <td>{cell.residentName || cell.residentId}</td>
+                        <td>{cell.column}</td>
+                        <td className="truncate">{cell.masterValue}</td>
+                        <td className="truncate">{cell.captainValue}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </>
+          )}
+
+          {!queued && preview.canApply && (
+            <label style={{ display: 'flex', gap: 10, alignItems: 'flex-start', marginTop: 18 }}>
+              <input
+                type="checkbox"
+                checked={confirmed}
+                onChange={(event) => setConfirmed(event.target.checked)}
+                style={{ marginTop: 4 }}
+              />
+              <span className="reading-copy">
+                I approve writing the ticked captain values to the <strong>master copy only</strong>, and logging the
+                rest as conflicts. The run will be recorded and can be undone from Runs.
+              </span>
+            </label>
+          )}
+          {queued && (
+            <div className="callout info" style={{ marginTop: 18 }}>
+              Live run <strong>#{queued.runId}</strong> is queued. Follow its status and use Undo from the{' '}
+              <a href="/runs">Runs page</a>. Conflicts appear in the <a href="/conflicts">Conflict inbox</a>.
+            </div>
+          )}
+          {!preview.canApply && (
+            <div className="callout info" style={{ marginTop: 18 }}>
+              The master copy already agrees with the captain copy on every shared column.
+            </div>
+          )}
+          <div className="btn-row" style={{ marginTop: 18 }}>
+            <button className="btn secondary" onClick={() => setPreview(null)}>
+              Close
+            </button>
+            {preview.canApply && !queued && (
+              <button className="btn highlight" onClick={applyPreview} disabled={!confirmed || applying}>
+                {applying
+                  ? 'Starting safely…'
+                  : selectedCount > 0
+                    ? `Write ${selectedCount} approved cell(s)`
+                    : 'Log conflicts only'}
+              </button>
+            )}
+          </div>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+function NewResidentsPlaybook() {
+  const { data, loading, error } = useAsync<SafeCopyTargetResponse>(() => api.get('/execution/copy-target'));
+  const [previewing, setPreviewing] = useState(false);
+  const [preview, setPreview] = useState<NewResidentsPreviewResponse | null>(null);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [confirmed, setConfirmed] = useState(false);
+  const [applying, setApplying] = useState(false);
+  const [queued, setQueued] = useState<QueuedRunResponse | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+
+  async function runPreview() {
+    setPreviewing(true);
+    setActionError(null);
+    setPreview(null);
+    setQueued(null);
+    setConfirmed(false);
+    try {
+      const result = await api.post<NewResidentsPreviewResponse>('/execution/new-residents/preview');
+      setPreview(result);
+      // Anything with a duplicate warning starts unticked, so adding a possible
+      // duplicate is always a deliberate act.
+      setSelected(
+        new Set(result.residents.filter((r) => r.risk === 'none').map((r) => r.residentId))
+      );
+    } catch (e) {
+      setActionError(e instanceof ApiError ? e.message : String(e));
+    } finally {
+      setPreviewing(false);
+    }
+  }
+
+  function toggle(residentId: string) {
+    const next = new Set(selected);
+    if (next.has(residentId)) next.delete(residentId);
+    else next.add(residentId);
+    setSelected(next);
+  }
+
+  async function applyPreview() {
+    if (!preview || !confirmed) return;
+    setApplying(true);
+    setActionError(null);
+    try {
+      setQueued(
+        await api.post<QueuedRunResponse>('/execution/new-residents/apply', {
+          previewRunId: preview.runId,
+          confirmed: true,
+          residentIds: [...selected],
+        })
+      );
+    } catch (e) {
+      setActionError(e instanceof ApiError ? e.message : String(e));
+    } finally {
+      setApplying(false);
+    }
+  }
+
+  if (loading) return null;
+  const target = data?.target;
+  const selectedCount = selected.size;
+  const flaggedSelected = preview
+    ? preview.residents.filter((r) => r.risk !== 'none' && selected.has(r.residentId)).length
+    : 0;
+
+  return (
+    <div className="card" style={{ borderColor: 'var(--golden-orange)', marginTop: 20 }}>
+      <div className="eyebrow">Fifth reversible live playbook · copies only</div>
+      <h3 style={{ marginTop: 6 }}>Add captain-created residents to the master copy</h3>
+      <p className="reading-copy" style={{ marginBottom: 12 }}>
+        Finds people a captain added to their sheet who have no row on the master, and — only for the rows you tick —
+        appends them as new master rows. Sharing an address is normal and never counts as a duplicate; SheetSmart flags
+        a row only when the same <em>person</em> looks like they are already on the master. Snapshotted and undoable.
+      </p>
+      {error && <ErrorState message={error} />}
+      {!target ? (
+        <p className="reading-copy">Configure the safe-copy target above first (same master copy and captain copy).</p>
+      ) : (
+        <>
+          <div className="callout info" style={{ marginBottom: 14 }}>
+            <strong>{target.captainName}</strong> ({target.captainTab}) → <strong>{target.masterName}</strong> (
+            {target.masterTab})
+            <br />
+            New rows only · existing master rows are never touched
+          </div>
+          <div className="btn-row">
+            <button className="btn highlight" onClick={runPreview} disabled={previewing}>
+              {previewing ? 'Comparing sheets…' : 'Preview new residents'}
+            </button>
+          </div>
+        </>
+      )}
+      {actionError && (
+        <div className="field-error" style={{ marginTop: 12 }}>
+          {actionError}
+        </div>
+      )}
+
+      {preview && (
+        <Modal title="Approve new residents for the master copy" onClose={() => setPreview(null)} wide>
+          <div className="callout">
+            <strong>{preview.impact.headline}</strong>
+            <div style={{ marginTop: 6 }}>{preview.impact.detail}</div>
+          </div>
+          <div className="card-grid" style={{ marginTop: 16 }}>
+            <Metric value={preview.impact.clean} label="Look like new people" />
+            <Metric
+              value={preview.impact.likelyDuplicates}
+              label="Likely already on master"
+              alert={preview.impact.likelyDuplicates > 0}
+            />
+            <Metric
+              value={preview.impact.possibleDuplicates}
+              label="Same name elsewhere"
+              alert={preview.impact.possibleDuplicates > 0}
+            />
+            <Metric value={preview.impact.candidates} label="Total not on master" />
+          </div>
+
+          {preview.columnsOnlyOnCaptain.length > 0 && (
+            <p className="reading-copy">
+              Columns only the captain sheet has (not copied): <strong>{preview.columnsOnlyOnCaptain.join(', ')}</strong>
+            </p>
+          )}
+
+          {preview.residents.length > 0 && (
+            <>
+              <p className="reading-copy">
+                {selectedCount} of {preview.residents.length} ticked.
+                {flaggedSelected > 0 && (
+                  <>
+                    {' '}
+                    <strong>{flaggedSelected} of them carry a duplicate warning.</strong>
+                  </>
+                )}
+              </p>
+              <div className="table-wrap">
+                <table className="data">
+                  <thead>
+                    <tr>
+                      <th />
+                      <th>Resident</th>
+                      <th>Property</th>
+                      <th>Row</th>
+                      <th>Filled</th>
+                      <th style={{ minWidth: 260 }}>Duplicate check</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {preview.residents.map((resident) => (
+                      <tr key={resident.residentId}>
+                        <td>
+                          <input
+                            type="checkbox"
+                            checked={selected.has(resident.residentId)}
+                            onChange={() => toggle(resident.residentId)}
+                            disabled={Boolean(queued)}
+                          />
+                        </td>
+                        <td style={{ whiteSpace: 'nowrap' }}>
+                          {resident.residentName || <em>no name</em>}
+                          {resident.missingRequired.length > 0 && (
+                            <div className="card-meta">missing: {resident.missingRequired.join(', ')}</div>
+                          )}
+                        </td>
+                        <td className="truncate">{resident.property || '—'}</td>
+                        <td>{resident.captainRow}</td>
+                        <td>{resident.filledColumns}</td>
+                        <td>
+                          {resident.risk === 'none' ? (
+                            <span className="card-meta">looks new</span>
+                          ) : (
+                            <>
+                              <strong>{resident.risk === 'likely' ? 'Likely duplicate' : 'Possible duplicate'}</strong>
+                              <div className="card-meta">{resident.riskReason}</div>
+                            </>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </>
+          )}
+
+          {preview.skipped.length > 0 && (
+            <p className="reading-copy">
+              {preview.skipped.length} captain row(s) could not be considered: {preview.skipped[0].reason}
+            </p>
+          )}
+
+          {!queued && preview.canApply && (
+            <label style={{ display: 'flex', gap: 10, alignItems: 'flex-start', marginTop: 18 }}>
+              <input
+                type="checkbox"
+                checked={confirmed}
+                onChange={(event) => setConfirmed(event.target.checked)}
+                style={{ marginTop: 4 }}
+              />
+              <span className="reading-copy">
+                I approve adding the {selectedCount} ticked resident(s) as new rows on the{' '}
+                <strong>master copy only</strong>
+                {flaggedSelected > 0 && (
+                  <>
+                    , including <strong>{flaggedSelected} flagged as a possible duplicate</strong>
+                  </>
+                )}
+                . The run will be recorded and can be undone from Runs.
+              </span>
+            </label>
+          )}
+          {queued && (
+            <div className="callout info" style={{ marginTop: 18 }}>
+              Live run <strong>#{queued.runId}</strong> is queued. Follow its status and use Undo from the{' '}
+              <a href="/runs">Runs page</a>.
+            </div>
+          )}
+          {!preview.canApply && (
+            <div className="callout info" style={{ marginTop: 18 }}>
+              Every resident on this captain sheet already has a row on the master copy.
+            </div>
+          )}
+          <div className="btn-row" style={{ marginTop: 18 }}>
+            <button className="btn secondary" onClick={() => setPreview(null)}>
+              Close
+            </button>
+            {preview.canApply && !queued && (
+              <button
+                className="btn highlight"
+                onClick={applyPreview}
+                disabled={!confirmed || applying || selectedCount === 0}
+              >
+                {applying ? 'Starting safely…' : `Add ${selectedCount} resident(s) to master copy`}
               </button>
             )}
           </div>
