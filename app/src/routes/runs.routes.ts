@@ -1,6 +1,7 @@
 import type { Router, Request, Response } from 'express';
 import type { Deps } from '../types';
 import { normalizeKey } from '../lib/columns';
+import { revalidateOpenPullConflicts } from '../executionTasks';
 
 // Run history + run review (spec "Run Review"). For a live run, the run record
 // and its detail rows ARE the permanent audit trail.
@@ -95,8 +96,9 @@ export default function registerRunRoutes(api: Router, { db }: Deps): void {
   });
 
   // Conflicts review (spec). Derived rows with open/resolved status.
-  api.get('/conflicts', (req: Request, res: Response) => {
+  api.get('/conflicts', async (req: Request, res: Response) => {
     const status = typeof req.query.status === 'string' ? req.query.status : 'open';
+    if (status === 'open') await revalidateOpenPullConflicts();
     res.json(
       db.all(
         `SELECT c.*, r.workflow_name, r.type AS run_type

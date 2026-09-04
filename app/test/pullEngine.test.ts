@@ -167,6 +167,35 @@ test('planPullToMaster: captain sales columns can never fill or overwrite master
   assert.strictEqual(plan.conflicts.length, 0);
 });
 
+test('planPullToMaster: dictionary types suppress only equivalent date and checkbox conflicts', () => {
+  const master: Grid = [
+    ['resident_id', 'Visit Date', 'Wants_Updates', 'Notes', '_SitusUnit', 'Zip'],
+    ['R1', 46211, false, 'false', 46211, '02134'],
+  ];
+  const captain: Grid = [
+    ['resident_id', 'Visit Date', 'Wants_Updates', 'Notes', '_SitusUnit', 'Zip'],
+    ['R1', '7/8/2026', 'false', false, '1/2', 2134],
+  ];
+  const plan = planPullToMaster(master, captain, {
+    policies: Object.fromEntries(master[0].map((column) => [String(column), 'fill_blank'])),
+    fieldMeta: {
+      'Visit Date': { dataType: 'date' },
+      Wants_Updates: { dataType: 'checkbox' },
+      Notes: { dataType: 'text' },
+      _SitusUnit: { dataType: 'text', isTextSafe: true },
+      Zip: { dataType: 'text', isTextSafe: true },
+    },
+  });
+
+  assert.deepStrictEqual(
+    plan.conflicts.map((conflict) => conflict.column).sort(),
+    ['Notes', 'Zip', '_SitusUnit'].sort()
+  );
+  assert.strictEqual(plan.conflicts.find((conflict) => conflict.column === '_SitusUnit')?.suspectedTextCoercion, true);
+  assert.ok(!plan.conflicts.some((conflict) => conflict.column === 'Visit Date'));
+  assert.ok(!plan.conflicts.some((conflict) => conflict.column === 'Wants_Updates'));
+});
+
 // ---- Captain-created residents ----
 
 // Two people share APN 100 on the master, which is normal: several residents

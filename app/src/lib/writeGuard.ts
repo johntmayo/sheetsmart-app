@@ -12,7 +12,13 @@
 //  - Only `overwrite`-policy columns may replace a non-blank value (rule 7).
 //  - Unlisted columns default to conflict-only (handled by the caller/default).
 
-import { isTargetCellBlank, isSourceCellBlank, cellValuesEqual, CellValue } from './values';
+import {
+  isTargetCellBlank,
+  isSourceCellBlank,
+  cellValuesEqual,
+  CellValue,
+  type FieldCompareMeta,
+} from './values';
 
 // The canonical policy vocabulary (handoff Section 5, rule 7).
 export type Policy = 'fill_blank' | 'overwrite' | 'conflict' | 'never';
@@ -41,6 +47,8 @@ export interface DecideWriteArgs {
   policy?: string | null;
   /** Columns forced to 'never'. Defaults to DEFAULT_PROTECTED_COLUMNS. */
   protectedColumns?: string[];
+  /** Field Dictionary type semantics for this column. */
+  fieldMeta?: FieldCompareMeta;
 }
 
 export interface DecideAppendCellArgs {
@@ -71,7 +79,14 @@ export function normalizePolicy(raw: unknown): Policy | '' {
  *
  * action ∈ 'fill' | 'overwrite' | 'conflict' | 'skip' | 'equal'
  */
-export function decideWrite({ column, target, source, policy, protectedColumns }: DecideWriteArgs = {}): WriteDecision {
+export function decideWrite({
+  column,
+  target,
+  source,
+  policy,
+  protectedColumns,
+  fieldMeta,
+}: DecideWriteArgs = {}): WriteDecision {
   const protectedList = protectedColumns || DEFAULT_PROTECTED_COLUMNS;
 
   let effectivePolicy: Policy = normalizePolicy(policy) || 'conflict';
@@ -90,7 +105,7 @@ export function decideWrite({ column, target, source, policy, protectedColumns }
   }
 
   // No-op when values already mean the same thing.
-  if (cellValuesEqual(target, source)) {
+  if (cellValuesEqual(target, source, fieldMeta)) {
     return decision('equal', effectivePolicy, 'Target already equals source', false);
   }
 

@@ -3,7 +3,7 @@
 // trusting stale row numbers from a preview and keeps every value behind the
 // write guard.
 
-import { cellValuesEqual, type CellValue } from './values';
+import { cellValuesEqual, type CellValue, type FieldCompareMeta, valueForTypedWrite } from './values';
 import type { Grid } from './mergeEngine';
 import { trimHeaders } from './mergeEngine';
 import { decideAppendCell, decideWrite, type Policy, type WriteAction } from './writeGuard';
@@ -13,6 +13,7 @@ export interface IdentityCellProposal {
   column: string;
   value: CellValue;
   policy?: string;
+  fieldMeta?: FieldCompareMeta;
 }
 
 export interface GuardedCellWrite {
@@ -222,11 +223,13 @@ export function planGuardedCellWrites(
     proposedCells.add(cellKey);
 
     const before = targetData[rowIndex]?.[colIndex];
+    const after = valueForTypedWrite(proposal.value, proposal.fieldMeta);
     const decision = decideWrite({
       column: proposal.column,
       target: before,
-      source: proposal.value,
+      source: after,
       policy: proposal.policy,
+      fieldMeta: proposal.fieldMeta,
     });
     const guarded: GuardedCellWrite = {
       residentId,
@@ -234,7 +237,7 @@ export function planGuardedCellWrites(
       col: colIndex + 1,
       column: proposal.column,
       before,
-      after: proposal.value,
+      after,
       action: decision.action,
       policy: decision.effectivePolicy,
     };

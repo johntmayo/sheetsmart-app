@@ -10,9 +10,8 @@
 // Defaults reasoning:
 // - default_policy 'fill_blank' everywhere (fill blanks only), except the
 //   identity key and Zone Dashboard-owned sales fields, which are 'never'.
-// - Checkboxes: only the two the source doc explicitly calls checkboxes are
-//   seeded as such (they count with `=== true`, not non-blank). Others are left
-//   as text for the Operator to confirm rather than guessed at.
+// - Checkboxes: approved binary fields use blank/false as unchecked and true
+//   as checked. This list is intentionally explicit rather than inferred.
 // - text-safe: APN, resident_id, address_id, Zip, _SitusUnit (Appendix A) — must
 //   be written RAW so Sheets can't mangle IDs/zips into dates/numbers.
 // - sensitive: the clear resident PII (contact details + free-text notes) so a
@@ -41,7 +40,20 @@ export interface SeedField {
 }
 
 const IDENTITY = new Set(['resident_id']);
-const CHECKBOX = new Set(['Address - For Sale', 'Address - Sold Since Fire']);
+export const APPROVED_BOOLEAN_FIELDS = [
+  'Wants_Updates',
+  'Former Resident',
+  'Deceased',
+  'Person - Needs Follow-Up',
+  'Person - Unable to Reach',
+  'Person - Renter',
+  'Successfully Contacted',
+] as const;
+const CHECKBOX = new Set([
+  'Address - For Sale',
+  'Address - Sold Since Fire',
+  ...APPROVED_BOOLEAN_FIELDS,
+]);
 const TEXT_SAFE = new Set(['APN', 'resident_id', 'address_id', 'Zip', '_SitusUnit']);
 const MASTER_ONLY = new Set<string>(ZONE_DASHBOARD_SALES_FIELDS);
 const SENSITIVE = new Set([

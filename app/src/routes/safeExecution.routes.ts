@@ -23,6 +23,7 @@ import {
   REVERT_CREATE_ZONE_SHEETS_TASK,
   REVERT_DELETION_TASK,
   pullCellKeys,
+  pullFieldMetaForHeaders,
   pullPoliciesForHeaders,
   type EnrichZonesPreviewPlan,
   type MoveCopyTarget,
@@ -316,7 +317,8 @@ export default function registerSafeExecutionRoutes(api: Router, { db }: Deps): 
         readGrid(target.captainSpreadsheetId, target.captainTab),
       ]);
       const policies = pullPoliciesForHeaders(trimHeaders(masterGrid[0]));
-      const plan = planPullToMaster(masterGrid, captainGrid, { policies });
+      const fieldMeta = pullFieldMetaForHeaders(trimHeaders(masterGrid[0]));
+      const plan = planPullToMaster(masterGrid, captainGrid, { policies, fieldMeta });
       if (plan.errors.length > 0) throw new Error(plan.errors.join('; '));
 
       const changes = [...plan.fills, ...plan.overwrites];

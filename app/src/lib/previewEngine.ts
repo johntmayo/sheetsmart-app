@@ -10,6 +10,7 @@
 
 import { findColumn } from './columns';
 import type { CellFillResult, ColumnMap, PushMissingResult } from './mergeEngine';
+import type { FieldMetaMap } from './values';
 
 // The subset of a dictionary field the preview needs. Mirrors dictionary_fields.
 export interface DictField {
@@ -17,6 +18,8 @@ export interface DictField {
   is_identity: number; // 0 | 1
   is_sensitive: number; // 0 | 1
   distribute_to_captain: number; // 0 | 1
+  data_type: 'text' | 'number' | 'date' | 'checkbox';
+  is_text_safe: number; // 0 | 1
   default_policy: string; // fill_blank | overwrite | conflict | never
   aliases: string[];
 }
@@ -26,6 +29,7 @@ export interface CellFillConfig {
   matchTargetHeader: string | null;
   columnMap: ColumnMap[];
   policies: Record<string, string>;
+  fieldMeta: FieldMetaMap;
   protectedColumns: string[];
   unmatchedFields: string[]; // logical fields that resolved on neither/one side
 }
@@ -52,6 +56,7 @@ export function buildCellFillConfig(
 
   const columnMap: ColumnMap[] = [];
   const policies: Record<string, string> = {};
+  const fieldMeta: FieldMetaMap = {};
   const protectedColumns: string[] = [];
   const unmatchedFields: string[] = [];
 
@@ -66,6 +71,11 @@ export function buildCellFillConfig(
     }
     columnMap.push({ source: sourceHeader, target: targetHeader });
     policies[targetHeader] = field.default_policy;
+    fieldMeta[targetHeader] = {
+      dataType: field.data_type,
+      isTextSafe: field.is_text_safe === 1,
+    };
+    fieldMeta[sourceHeader] = fieldMeta[targetHeader];
     if (field.is_identity === 1 || field.default_policy === 'never') {
       protectedColumns.push(targetHeader);
     }
@@ -76,7 +86,7 @@ export function buildCellFillConfig(
     protectedColumns.push(matchTargetHeader);
   }
 
-  return { matchSourceHeader, matchTargetHeader, columnMap, policies, protectedColumns, unmatchedFields };
+  return { matchSourceHeader, matchTargetHeader, columnMap, policies, fieldMeta, protectedColumns, unmatchedFields };
 }
 
 // ---- Plain-language impact summaries ----

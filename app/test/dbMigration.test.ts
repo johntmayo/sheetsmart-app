@@ -35,6 +35,16 @@ test('existing dictionaries migrate safely and mark sales fields master-only', a
   const insert = legacy.prepare('INSERT INTO dictionary_fields (canonical_name, sort_order) VALUES (?, ?)');
   salesFields.forEach((field, index) => insert.run(field, index));
   insert.run('Resident Name', salesFields.length);
+  const approvedBooleans = [
+    'Wants_Updates',
+    'Former Resident',
+    'Deceased',
+    'Person - Needs Follow-Up',
+    'Person - Unable to Reach',
+    'Person - Renter',
+    'Successfully Contacted',
+  ];
+  approvedBooleans.forEach((field, index) => insert.run(field, salesFields.length + index + 1));
   legacy.close();
 
   process.env.DATABASE_PATH = databasePath;
@@ -52,6 +62,14 @@ test('existing dictionaries migrate safely and mark sales fields master-only', a
     migrated.find((field) => field.canonical_name === 'Resident Name')?.distribute_to_captain,
     1
   );
+  const typed = connection
+    .prepare(
+      `SELECT canonical_name, data_type FROM dictionary_fields
+       WHERE canonical_name IN (${approvedBooleans.map(() => '?').join(',')})`
+    )
+    .all(...approvedBooleans) as Array<{ canonical_name: string; data_type: string }>;
+  assert.strictEqual(typed.length, approvedBooleans.length);
+  assert.ok(typed.every((field) => field.data_type === 'checkbox'));
   for (const table of [
     'deletion_operations',
     'deletion_archive_index',

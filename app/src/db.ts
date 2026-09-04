@@ -6,7 +6,7 @@ import fs from 'fs';
 import path from 'path';
 import Database from 'better-sqlite3';
 import { config } from './config';
-import { buildSeed } from './dictionarySeed';
+import { APPROVED_BOOLEAN_FIELDS, buildSeed } from './dictionarySeed';
 import { ZONE_DASHBOARD_SALES_FIELDS, ZONE_DASHBOARD_SALES_NOTE } from './lib/salesFieldPolicy';
 
 // The dictionary field data types, shared with the seed + routes.
@@ -299,6 +299,7 @@ export function init(): Database.Database {
   ensureDeletionMarkerField();
   applySalesOwnershipLock();
   applyPrivacyClassificationV1();
+  applyApprovedBooleanTypesV1();
   redactHistoricalSensitiveLogsV1();
   return db;
 }
@@ -436,6 +437,23 @@ function applyPrivacyClassificationV1(): void {
   const tx = conn.transaction(() => {
     conn
       .prepare(`UPDATE dictionary_fields SET is_sensitive=1 WHERE canonical_name IN (${fields.map(() => '?').join(',')})`)
+      .run(...fields);
+    conn.prepare('INSERT INTO app_settings (key, value) VALUES (?, ?)').run(key, new Date().toISOString());
+  });
+  tx();
+}
+
+function applyApprovedBooleanTypesV1(): void {
+  const conn = getDb();
+  const key = 'approved_boolean_types_v1';
+  if (conn.prepare('SELECT value FROM app_settings WHERE key=?').get(key)) return;
+  const fields = [...APPROVED_BOOLEAN_FIELDS];
+  const tx = conn.transaction(() => {
+    conn
+      .prepare(
+        `UPDATE dictionary_fields SET data_type='checkbox'
+         WHERE canonical_name IN (${fields.map(() => '?').join(',')})`
+      )
       .run(...fields);
     conn.prepare('INSERT INTO app_settings (key, value) VALUES (?, ?)').run(key, new Date().toISOString());
   });

@@ -15,6 +15,7 @@ interface ConflictRow {
   resident_id: string;
   existing_value: string;
   incoming_value: string;
+  resolution_notes?: string;
   context_json?: string;
 }
 
@@ -23,6 +24,11 @@ interface ConflictContext {
   tabName?: string;
   sourceName?: string;
   residentName?: string;
+  masterDisplay?: string;
+  captainDisplay?: string;
+  reason?: string;
+  suspectedTextCoercion?: boolean;
+  revalidationStatus?: 'current' | 'stale' | 'equivalent';
 }
 
 export function Conflicts() {
@@ -69,7 +75,10 @@ export function Conflicts() {
   if (loading) return <Spinner />;
   if (error) return <ErrorState message={error} />;
   const rows = data ?? [];
-  const applicable = rows.filter((row) => parseContext(row).kind === 'pull_to_master');
+  const applicable = rows.filter((row) => {
+    const context = parseContext(row);
+    return context.kind === 'pull_to_master' && context.revalidationStatus !== 'stale';
+  });
   const selectedCount = applicable.filter((row) => selected.has(row.id)).length;
 
   return (
@@ -116,7 +125,8 @@ export function Conflicts() {
               <tbody>
                 {rows.map((c) => {
                   const context = parseContext(c);
-                  const canApply = context.kind === 'pull_to_master';
+                  const canApply =
+                    context.kind === 'pull_to_master' && context.revalidationStatus !== 'stale';
                   return (
                     <tr key={c.id}>
                       <td>
@@ -132,9 +142,18 @@ export function Conflicts() {
                       <td className="truncate">{context.residentName || c.resident_id || '—'}</td>
                       <td>{c.row}</td>
                       <td>{c.column}</td>
-                      <td className="truncate">{c.existing_value}</td>
-                      <td className="truncate">{c.incoming_value}</td>
+                      <td>{expandableValue(context.masterDisplay || c.existing_value)}</td>
+                      <td>{expandableValue(context.captainDisplay || c.incoming_value)}</td>
                       <td>
+                        <div style={{ maxWidth: 300, marginBottom: 6 }}>
+                          {context.revalidationStatus === 'stale' ? (
+                            <strong>Stale — run a fresh pull before applying.</strong>
+                          ) : context.suspectedTextCoercion ? (
+                            <strong>Possible Sheets coercion — correct manually.</strong>
+                          ) : (
+                            context.reason || c.resolution_notes || 'Current typed values genuinely differ.'
+                          )}
+                        </div>
                         <button className="btn secondary small" onClick={() => resolve(c.id)}>
                           Dismiss (no sheet change)
                         </button>
@@ -148,6 +167,16 @@ export function Conflicts() {
         </>
       )}
     </>
+  );
+}
+
+function expandableValue(value: string) {
+  if (value.length <= 80) return <span>{value || '(blank)'}</span>;
+  return (
+    <details>
+      <summary>{value.slice(0, 77)}…</summary>
+      <div style={{ whiteSpace: 'pre-wrap', minWidth: 260 }}>{value}</div>
+    </details>
   );
 }
 

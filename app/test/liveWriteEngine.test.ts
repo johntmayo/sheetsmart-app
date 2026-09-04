@@ -51,6 +51,34 @@ test('cell writes reject protected identity changes and ambiguous duplicate iden
   assert.match(plan.skipped[0].reason, /Duplicate resident_id/);
 });
 
+test('guarded writes preserve typed checkbox safety and source values', () => {
+  const target = [
+    ['resident_id', 'Wants_Updates', 'Notes'],
+    ['R-1', false, 'false'],
+  ];
+  const plan = planGuardedCellWrites(target, [
+    {
+      residentId: 'R-1',
+      column: 'Wants_Updates',
+      value: 'true',
+      policy: 'fill_blank',
+      fieldMeta: { dataType: 'checkbox' },
+    },
+    {
+      residentId: 'R-1',
+      column: 'Notes',
+      value: false,
+      policy: 'fill_blank',
+      fieldMeta: { dataType: 'text' },
+    },
+  ]);
+
+  assert.strictEqual(plan.writes.length, 0);
+  assert.strictEqual(plan.conflicts.length, 2);
+  assert.strictEqual(plan.conflicts[0].after, true);
+  assert.strictEqual(plan.conflicts[1].after, false);
+});
+
 test('append planning adds only identities absent from the current target', () => {
   const target = [
     ['resident_id', 'Resident Name', 'Phone'],

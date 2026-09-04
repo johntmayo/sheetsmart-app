@@ -16,7 +16,14 @@ import { createHash } from 'node:crypto';
 import { trimHeaders, type Grid } from './mergeEngine';
 import { isZoneDashboardSalesField } from './salesFieldPolicy';
 import { decideWrite, normalizePolicy, type Policy } from './writeGuard';
-import type { CellValue } from './values';
+import {
+  type CellValue,
+  type FieldCompareMeta,
+  type FieldMetaMap,
+  isSuspectedTextCoercion,
+  normalizeForCompare,
+  valueForTypedWrite,
+} from './values';
 
 export interface PullCellChange {
   residentId: string;
@@ -28,6 +35,10 @@ export interface PullCellChange {
   masterValue: CellValue;
   captainValue: CellValue;
   policy: Policy;
+  fieldMeta?: FieldCompareMeta;
+  masterNormalized: string;
+  captainNormalized: string;
+  suspectedTextCoercion: boolean;
 }
 
 export interface PullSkip {
@@ -56,6 +67,8 @@ export interface PullToMasterPlan {
 export interface PullToMasterOptions {
   /** Per-column policy, usually the Field Dictionary's default_policy. */
   policies?: Record<string, string>;
+  /** Per-column Field Dictionary data_type/is_text_safe semantics. */
+  fieldMeta?: FieldMetaMap;
   /** Policy for columns with no entry. Legacy default is conflict-only. */
   defaultPolicy?: string;
   identityColumn?: string;
@@ -104,6 +117,7 @@ export function planPullToMaster(
   const nameColumn = options.nameColumn || 'Resident Name';
   const defaultPolicy = options.defaultPolicy || 'conflict';
   const policies = options.policies || {};
+  const fieldMeta = options.fieldMeta || {};
 
   const plan: PullToMasterPlan = {
     fills: [],
@@ -130,7 +144,13 @@ export function planPullToMaster(
   }
 
   const restrict = options.columns && options.columns.length > 0 ? new Set(options.columns) : null;
-  const comparable: Array<{ column: string; masterCol: number; captainCol: number; policy: Policy }> = [];
+  const comparable: Array<{
+    column: string;
+    masterCol: number;
+    captainCol: number;
+    policy: Policy;
+    fieldMeta?: FieldCompareMeta;
+  }> = [];
   for (let captainCol = 0; captainCol < captainHeaders.length; captainCol++) {
     const column = captainHeaders[captainCol];
     if (!column || column === identityColumn) continue;
@@ -140,7 +160,7 @@ export function planPullToMaster(
     if (masterCol === -1) continue;
     if (comparable.some((entry) => entry.column === column)) continue;
     const policy = normalizePolicy(policies[column]) || normalizePolicy(defaultPolicy) || 'conflict';
-    comparable.push({ column, masterCol, captainCol, policy });
+    comparable.push({ column, masterCol, captainCol, policy, fieldMeta: fieldMeta[column] });
   }
   plan.columnsCompared = comparable.map((entry) => entry.column);
   if (comparable.length === 0) {
@@ -196,13 +216,15 @@ export function planPullToMaster(
       residentName || (masterNameCol !== -1 ? text(masterRow[masterNameCol]) : '');
 
     for (const entry of comparable) {
-      const captainValue = captainRow[entry.captainCol];
+      const rawCaptainValue = captainRow[entry.captainCol];
+      const captainValue = valueForTypedWrite(rawCaptainValue, entry.fieldMeta);
       const masterValue = masterRow[entry.masterCol];
       const decision = decideWrite({
         column: entry.column,
         target: masterValue,
         source: captainValue,
         policy: entry.policy,
+        fieldMeta: entry.fieldMeta,
       });
       const change: PullCellChange = {
         residentId,
@@ -214,6 +236,12 @@ export function planPullToMaster(
         masterValue,
         captainValue,
         policy: decision.effectivePolicy,
+        fieldMeta: entry.fieldMeta,
+        masterNormalized: normalizeForCompare(masterValue, entry.fieldMeta),
+        captainNormalized: normalizeForCompare(rawCaptainValue, entry.fieldMeta),
+        suspectedTextCoercion:
+          isSuspectedTextCoercion(masterValue, entry.fieldMeta) ||
+          isSuspectedTextCoercion(rawCaptainValue, entry.fieldMeta),
       };
 
       if (decision.action === 'fill') plan.fills.push(change);

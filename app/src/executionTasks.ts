@@ -39,8 +39,14 @@ import {
   type PullCellChange,
   type PullCellKey,
 } from './lib/pullEngine';
-import { cellValuesEqual } from './lib/values';
 import { isZoneDashboardSalesField } from './lib/salesFieldPolicy';
+import {
+  cellValuesEqual,
+  displayCellValue,
+  normalizeForCompare,
+  type FieldCompareMeta,
+  type FieldMetaMap,
+} from './lib/values';
 import { fetchZoneFeatures, isMapboxConfigured, DEFAULT_MAPBOX_USERNAME, DEFAULT_MAPBOX_DATASET_ID } from './mapbox';
 import {
   canonicalizeHeaders,
@@ -53,6 +59,7 @@ import {
 import type { CellValue } from './lib/values';
 import { fingerprintMissingZoneSheets, planMissingZoneSheets } from './lib/zoneSheetEngine';
 import { filterGridByTombstones, loadActiveTombstones } from './lib/tombstones';
+import { classifyConflictFreshness } from './lib/conflictRevalidation';
 import {
   fingerprintArchivedPayload,
   planAddressDeletion,
@@ -186,8 +193,19 @@ export interface ConflictContext {
   residentName: string;
   column: string;
   masterRow: number;
-  masterValue: string;
-  captainValue: string;
+  masterValue: CellValue;
+  captainValue: CellValue;
+  masterDisplay?: string;
+  captainDisplay?: string;
+  masterNormalized?: string;
+  captainNormalized?: string;
+  fieldMeta?: FieldCompareMeta;
+  suspectedTextCoercion?: boolean;
+  reason?: string;
+  revalidationStatus?: 'current' | 'stale' | 'equivalent';
+  revalidatedAt?: string;
+  currentMasterValue?: CellValue;
+  currentCaptainValue?: CellValue;
   sourceSpreadsheetId: string;
   sourceName: string;
   sourceTab: string;
@@ -402,6 +420,133 @@ export function pullPoliciesForHeaders(headers: string[]): Record<string, string
   return policies;
 }
 
+export function pullFieldMetaForHeaders(headers: string[]): FieldMetaMap {
+  const result: FieldMetaMap = {};
+  const fields = db.all<{
+    id: number;
+    canonical_name: string;
+    data_type: FieldCompareMeta['dataType'];
+    is_text_safe: number;
+  }>('SELECT id, canonical_name, data_type, is_text_safe FROM dictionary_fields');
+  for (const field of fields) {
+    const aliases = db
+      .all<{ alias: string }>('SELECT alias FROM dictionary_aliases WHERE field_id = ?', [field.id])
+      .map((row) => row.alias);
+    const header = findColumn(headers, [field.canonical_name, ...aliases]);
+    if (header) {
+      result[header] = { dataType: field.data_type, isTextSafe: field.is_text_safe === 1 };
+    }
+  }
+  return result;
+}
+
+export async function revalidateOpenPullConflicts(): Promise<{
+  checked: number;
+  resolved: number;
+  stale: number;
+}> {
+  if (!google.isConfigured()) return { checked: 0, resolved: 0, stale: 0 };
+  const rows = db.all<ConflictRow>("SELECT * FROM conflicts WHERE status='open' ORDER BY id");
+  const grids = new Map<string, Promise<Grid>>();
+  const load = (spreadsheetId: string, tabName: string) => {
+    const key = `${spreadsheetId}\u0000${tabName}`;
+    const cached = grids.get(key);
+    if (cached) return cached;
+    const pending = readGrid(spreadsheetId, tabName);
+    grids.set(key, pending);
+    return pending;
+  };
+  let checked = 0;
+  let resolved = 0;
+  let stale = 0;
+
+  for (const row of rows) {
+    const context = parseConflictContext(row.context_json);
+    if (!context?.sourceSpreadsheetId || !context.sourceTab) continue;
+    checked++;
+    try {
+      const [masterGrid, captainGrid] = await Promise.all([
+        load(context.spreadsheetId, context.tabName),
+        load(context.sourceSpreadsheetId, context.sourceTab),
+      ]);
+      const masterHeaders = trimHeaders(masterGrid[0]);
+      const captainHeaders = trimHeaders(captainGrid[0]);
+      const masterRow = findRowByResidentId(masterGrid, masterHeaders, row.resident_id);
+      const captainRow = findRowByResidentId(captainGrid, captainHeaders, row.resident_id);
+      const masterCol = masterHeaders.indexOf(context.column || row.column);
+      const captainCol = captainHeaders.indexOf(context.column || row.column);
+      if (masterRow === -1 || captainRow === -1 || masterCol === -1 || captainCol === -1) {
+        stale++;
+        context.revalidationStatus = 'stale';
+        context.revalidatedAt = new Date().toISOString();
+        db.run('UPDATE conflicts SET resolution_notes=?, context_json=? WHERE id=?', [
+          'Stale: the resident or field is no longer present on both sheets.',
+          JSON.stringify(context),
+          row.id,
+        ]);
+        continue;
+      }
+      const masterValue = masterGrid[masterRow]?.[masterCol];
+      const captainValue = captainGrid[captainRow]?.[captainCol];
+      const fieldMeta = pullFieldMetaForHeaders(masterHeaders)[context.column || row.column] || context.fieldMeta;
+      context.fieldMeta = fieldMeta;
+      context.currentMasterValue = masterValue;
+      context.currentCaptainValue = captainValue;
+      context.revalidatedAt = new Date().toISOString();
+
+      const freshness = classifyConflictFreshness({
+        originalMaster: legacyTypedConflictValue(context.masterValue, fieldMeta, context.masterNormalized),
+        originalCaptain: legacyTypedConflictValue(context.captainValue, fieldMeta, context.captainNormalized),
+        currentMaster: masterValue,
+        currentCaptain: captainValue,
+        fieldMeta,
+      });
+      if (freshness === 'equivalent') {
+        resolved++;
+        context.revalidationStatus = 'equivalent';
+        db.run(
+          `UPDATE conflicts
+           SET status='resolved', resolution_notes=?, existing_value=?, incoming_value=?, context_json=?
+           WHERE id=?`,
+          [
+            'Auto-resolved: current master and captain values are equivalent under Field Dictionary type rules.',
+            displayCellValue(masterValue, fieldMeta),
+            displayCellValue(captainValue, fieldMeta),
+            JSON.stringify(context),
+            row.id,
+          ]
+        );
+        continue;
+      }
+
+      const changed = freshness === 'stale';
+      context.revalidationStatus = changed ? 'stale' : 'current';
+      if (changed) stale++;
+      db.run(
+        `UPDATE conflicts
+         SET resolution_notes=?, existing_value=?, incoming_value=?, context_json=?
+         WHERE id=?`,
+        [
+          changed
+            ? 'Stale: current sheet values changed after this conflict was recorded; run a fresh pull.'
+            : 'Revalidated: this is still a genuine typed disagreement.',
+          displayCellValue(masterValue, fieldMeta),
+          displayCellValue(captainValue, fieldMeta),
+          JSON.stringify(context),
+          row.id,
+        ]
+      );
+    } catch (error) {
+      stale++;
+      db.run('UPDATE conflicts SET resolution_notes=? WHERE id=?', [
+        `Revalidation unavailable: ${String((error as Error)?.message || error)}`,
+        row.id,
+      ]);
+    }
+  }
+  return { checked, resolved, stale };
+}
+
 export function pullCellKeys(changes: PullCellChange[]): PullCellKey[] {
   return changes.map((change) => ({
     residentId: change.residentId,
@@ -426,7 +571,8 @@ async function pullToMasterCopy(ctx: JobContext): Promise<unknown> {
     readGrid(target.captainSpreadsheetId, target.captainTab),
   ]);
   const policies = pullPoliciesForHeaders(trimHeaders(masterGrid[0]));
-  const plan = planPullToMaster(masterGrid, captainGrid, { policies });
+  const fieldMeta = pullFieldMetaForHeaders(trimHeaders(masterGrid[0]));
+  const plan = planPullToMaster(masterGrid, captainGrid, { policies, fieldMeta });
   if (plan.errors.length > 0) throw new Error(plan.errors.join('; '));
 
   const approvedKeys = new Set(approvedCells.map((cell) => `${cell.residentId}\u0000${cell.column}`));
@@ -467,6 +613,7 @@ async function pullToMasterCopy(ctx: JobContext): Promise<unknown> {
       column: change.column,
       value: change.captainValue,
       policy: change.policy,
+      fieldMeta: change.fieldMeta,
     }))
   );
   if (guarded.errors.length > 0) throw new Error(guarded.errors.join('; '));
@@ -585,10 +732,19 @@ async function applyConflictCopy(ctx: JobContext): Promise<unknown> {
     const { context } = group;
     assertCopyMaster(context.spreadsheetId);
     ctx.reportProgress({ stage: 'reading', message: `Rechecking ${context.spreadsheetName} before writing.` });
-    const grid = await readGrid(context.spreadsheetId, context.tabName);
+    const [grid, sourceGrid] = await Promise.all([
+      readGrid(context.spreadsheetId, context.tabName),
+      readGrid(context.sourceSpreadsheetId, context.sourceTab),
+    ]);
     const headers = trimHeaders(grid[0]);
+    const sourceHeaders = trimHeaders(sourceGrid[0]);
+    const metadata = pullFieldMetaForHeaders(headers);
 
-    const applicable: ConflictRow[] = [];
+    const applicable: Array<{
+      conflict: ConflictRow;
+      value: CellValue;
+      fieldMeta?: FieldCompareMeta;
+    }> = [];
     for (const conflict of group.rows) {
       const conflictContext = parseConflictContext(conflict.context_json);
       const column = conflictContext?.column || conflict.column;
@@ -605,43 +761,77 @@ async function applyConflictCopy(ctx: JobContext): Promise<unknown> {
       }
       const colIndex = headers.indexOf(column);
       const rowIndex = findRowByResidentId(grid, headers, conflict.resident_id);
+      const sourceColIndex = sourceHeaders.indexOf(column);
+      const sourceRowIndex = findRowByResidentId(sourceGrid, sourceHeaders, conflict.resident_id);
       const current = colIndex === -1 || rowIndex === -1 ? undefined : grid[rowIndex]?.[colIndex];
-      if (colIndex === -1 || rowIndex === -1) {
+      const currentSource =
+        sourceColIndex === -1 || sourceRowIndex === -1
+          ? undefined
+          : sourceGrid[sourceRowIndex]?.[sourceColIndex];
+      const fieldMeta = metadata[column] || conflictContext?.fieldMeta;
+      if (colIndex === -1 || rowIndex === -1 || sourceColIndex === -1 || sourceRowIndex === -1) {
         skipped++;
         ctx.log({
           spreadsheet: context.spreadsheetName,
           resident_id: conflict.resident_id,
           column,
           type: 'skip',
-          message: 'That resident or column is no longer on the master copy.',
+          message: 'That resident or column is no longer available on both the master and captain copies.',
         });
         continue;
       }
-      // Only apply when the master still holds the value we showed the Operator.
-      if (!cellValuesEqual(current ?? '', conflict.existing_value)) {
+      if (cellValuesEqual(current, currentSource, fieldMeta)) {
+        db.run("UPDATE conflicts SET status='resolved', resolution_notes=? WHERE id=?", [
+          `Auto-resolved during apply by run #${ctx.runId}: current typed values are equivalent.`,
+          conflict.id,
+        ]);
+        continue;
+      }
+      // Only apply when both live cells still mean what the Operator reviewed.
+      const freshness = classifyConflictFreshness({
+        originalMaster: legacyTypedConflictValue(
+          conflictContext?.masterValue ?? conflict.existing_value,
+          fieldMeta,
+          conflictContext?.masterNormalized
+        ),
+        originalCaptain: legacyTypedConflictValue(
+          conflictContext?.captainValue ?? conflict.incoming_value,
+          fieldMeta,
+          conflictContext?.captainNormalized
+        ),
+        currentMaster: current,
+        currentCaptain: currentSource,
+        fieldMeta,
+      });
+      if (freshness === 'stale') {
         stale++;
+        db.run('UPDATE conflicts SET resolution_notes=? WHERE id=?', [
+          'Stale: the master or captain value changed after this conflict was recorded. Re-run pull before applying.',
+          conflict.id,
+        ]);
         ctx.log({
           spreadsheet: context.spreadsheetName,
           resident_id: conflict.resident_id,
           column,
           type: 'conflict',
           existing_value: String(current ?? ''),
-          incoming_value: conflict.incoming_value,
-          message: 'The master value changed since this conflict was logged, so it was left alone.',
+          incoming_value: String(currentSource ?? ''),
+          message: 'The master or captain value changed since this conflict was logged, so it was left alone.',
         });
         continue;
       }
-      applicable.push(conflict);
+      applicable.push({ conflict, value: currentSource, fieldMeta });
     }
     if (applicable.length === 0) continue;
 
     const guarded = planGuardedCellWrites(
       grid,
-      applicable.map((conflict) => ({
+      applicable.map(({ conflict, value, fieldMeta }) => ({
         residentId: conflict.resident_id,
         column: parseConflictContext(conflict.context_json)?.column || conflict.column,
-        value: conflict.incoming_value,
+        value,
         policy: 'overwrite' as const,
+        fieldMeta,
       }))
     );
     if (guarded.errors.length > 0) throw new Error(guarded.errors.join('; '));
@@ -694,7 +884,7 @@ async function applyConflictCopy(ctx: JobContext): Promise<unknown> {
 
     const writtenKeys = new Set(guarded.writes.map((write) => `${write.residentId}\u0000${write.column}`));
     const resolveConflicts = db.transaction(() => {
-      for (const conflict of applicable) {
+      for (const { conflict } of applicable) {
         const column = parseConflictContext(conflict.context_json)?.column || conflict.column;
         if (!writtenKeys.has(`${conflict.resident_id}\u0000${column}`)) continue;
         db.run("UPDATE conflicts SET status = 'resolved', resolution_notes = ? WHERE id = ?", [
@@ -760,8 +950,18 @@ function recordPullConflicts(runId: number, target: SafeCopyTarget, conflicts: P
         residentName: conflict.residentName,
         column: conflict.column,
         masterRow: conflict.masterRow,
-        masterValue: String(conflict.masterValue ?? ''),
-        captainValue: String(conflict.captainValue ?? ''),
+        masterValue: conflict.masterValue,
+        captainValue: conflict.captainValue,
+        masterDisplay: displayCellValue(conflict.masterValue, conflict.fieldMeta),
+        captainDisplay: displayCellValue(conflict.captainValue, conflict.fieldMeta),
+        masterNormalized: conflict.masterNormalized,
+        captainNormalized: conflict.captainNormalized,
+        fieldMeta: conflict.fieldMeta,
+        suspectedTextCoercion: conflict.suspectedTextCoercion,
+        reason: conflict.suspectedTextCoercion
+          ? 'A text-safe field contains a numeric raw value; review possible Google Sheets coercion manually.'
+          : 'Master and captain values differ under the Field Dictionary type rules.',
+        revalidationStatus: 'current',
         sourceSpreadsheetId: target.captainSpreadsheetId,
         sourceName: target.captainName,
         sourceTab: target.captainTab,
@@ -773,7 +973,7 @@ function recordPullConflicts(runId: number, target: SafeCopyTarget, conflicts: P
           `UPDATE conflicts
              SET run_id = ?, existing_value = ?, incoming_value = ?, context_json = ?
            WHERE id = ?`,
-          [runId, context.masterValue, context.captainValue, JSON.stringify(context), existingId]
+          [runId, context.masterDisplay, context.captainDisplay, JSON.stringify(context), existingId]
         );
       } else {
         db.run(
@@ -786,8 +986,8 @@ function recordPullConflicts(runId: number, target: SafeCopyTarget, conflicts: P
             String(conflict.masterRow),
             conflict.column,
             conflict.residentId,
-            context.masterValue,
-            context.captainValue,
+            context.masterDisplay,
+            context.captainDisplay,
             JSON.stringify(context),
           ]
         );
@@ -807,6 +1007,22 @@ function parseConflictContext(json: string): ConflictContext | null {
   } catch {
     return null;
   }
+}
+
+function legacyTypedConflictValue(
+  value: CellValue,
+  fieldMeta?: FieldCompareMeta,
+  normalized?: string
+): CellValue {
+  if (
+    !normalized &&
+    fieldMeta?.dataType === 'date' &&
+    typeof value === 'string' &&
+    /^-?\d+(\.\d+)?$/.test(value.trim())
+  ) {
+    return Number(value);
+  }
+  return value;
 }
 
 function findRowByResidentId(grid: Grid, headers: string[], residentId: string): number {

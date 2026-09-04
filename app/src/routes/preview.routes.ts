@@ -22,6 +22,8 @@ interface ConnectionRow {
 interface DictFieldRow {
   id: number;
   canonical_name: string;
+  data_type: 'text' | 'number' | 'date' | 'checkbox';
+  is_text_safe: number;
   is_identity: number;
   is_sensitive: number;
   distribute_to_captain: number;
@@ -124,11 +126,13 @@ export default function registerPreviewRoutes(api: Router, { db }: Deps): void {
 
 function loadDictionary(db: Deps['db']): DictField[] {
   const rows = db.all<DictFieldRow>(
-    `SELECT id, canonical_name, is_identity, is_sensitive, distribute_to_captain, default_policy
+    `SELECT id, canonical_name, data_type, is_text_safe, is_identity, is_sensitive, distribute_to_captain, default_policy
      FROM dictionary_fields ORDER BY sort_order`
   );
   return rows.map((r) => ({
     canonical_name: r.canonical_name,
+    data_type: r.data_type,
+    is_text_safe: r.is_text_safe,
     is_identity: r.is_identity,
     is_sensitive: r.is_sensitive,
     distribute_to_captain: r.distribute_to_captain,
@@ -173,6 +177,7 @@ async function previewPushMaster(folder: ConnectionRow, masterGrid: Grid, dict: 
       }
       const plan = planCellFill(captainGrid, lookup, cfg.matchTargetHeader, cfg.columnMap, {
         policies: cfg.policies,
+        fieldMeta: cfg.fieldMeta,
         protectedColumns: cfg.protectedColumns,
         defaultPolicy: 'fill_blank',
       });
