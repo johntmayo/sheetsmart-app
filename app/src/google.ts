@@ -278,14 +278,12 @@ export async function readCleanupSheet(
     sheets.spreadsheets.get({
       spreadsheetId,
       ranges: [quoteTabName(tab)],
-      includeGridData: true,
+      includeGridData: false,
       fields: [
         'spreadsheetId',
         'properties.title',
         'namedRanges',
         'sheets(properties(sheetId,title,gridProperties(rowCount,columnCount))',
-        'data.columnMetadata',
-        'data.rowData.values(userEnteredValue,effectiveValue,formattedValue,userEnteredFormat,effectiveFormat,dataValidation,note)',
         'merges,conditionalFormats,protectedRanges,filterViews,basicFilter,charts)',
       ].join(','),
     })
@@ -295,9 +293,34 @@ export async function readCleanupSheet(
   const props = source.properties;
   const rowCount = props?.gridProperties?.rowCount || 0;
   const columnCount = props?.gridProperties?.columnCount || 0;
-  const rows = source.data?.[0]?.rowData || [];
-  const cells: CleanupCell[][] = rows.map((row) =>
-    (row.values || []).map((value) => ({
+  const cells: CleanupCell[][] = [];
+  let columnMetadata: Array<Record<string, unknown>> = [];
+  // Keep each JSON payload far below V8's string limit while avoiding hundreds
+  // of quota-heavy requests for large master tabs.
+  const rowsPerRequest = 5000;
+  const endColumn = columnCount > 0 ? columnLetter(columnCount - 1) : 'A';
+  for (let startRow = 1; startRow <= rowCount; startRow += rowsPerRequest) {
+    const endRow = Math.min(rowCount, startRow + rowsPerRequest - 1);
+    const chunk = await withRetry(() =>
+      sheets.spreadsheets.get({
+        spreadsheetId,
+        ranges: [a1Range(tab, `A${startRow}:${endColumn}${endRow}`)],
+        includeGridData: true,
+        fields: [
+          'sheets(data(startRow,startColumn,columnMetadata',
+          'rowData.values(userEnteredValue,effectiveValue,formattedValue,userEnteredFormat,effectiveFormat,dataValidation,note)))',
+        ].join(','),
+      })
+    );
+    const grid = chunk.data.sheets?.[0]?.data?.[0];
+    const offset = grid?.startRow ?? startRow - 1;
+    if (columnMetadata.length === 0 && (grid?.columnMetadata || []).length > 0) {
+      columnMetadata = (grid?.columnMetadata || []).map((item) =>
+        JSON.parse(JSON.stringify(item)) as Record<string, unknown>
+      );
+    }
+    for (let rowOffset = 0; rowOffset < (grid?.rowData || []).length; rowOffset++) {
+      cells[offset + rowOffset] = (grid?.rowData?.[rowOffset]?.values || []).map((value) => ({
       userEnteredValue: sheetExtendedValue(value.userEnteredValue),
       effectiveValue: sheetExtendedValue(value.effectiveValue) as CleanupCell['effectiveValue'],
       formattedValue: value.formattedValue ?? '',
@@ -315,8 +338,9 @@ export async function readCleanupSheet(
         : undefined,
       dataValidation: value.dataValidation ? JSON.parse(JSON.stringify(value.dataValidation)) : undefined,
       note: value.note || undefined,
-    }))
-  );
+      }));
+    }
+  }
   const dependencies: CleanupDependency[] = [];
   const selectedTabHasFormula = cells.some((row) =>
     row.some((cell) => cell.userEnteredValue && typeof cell.userEnteredValue === 'object')
@@ -381,9 +405,7 @@ export async function readCleanupSheet(
     rowCount,
     columnCount,
     cells,
-    columnMetadata: (source.data?.[0]?.columnMetadata || []).map((item) =>
-      JSON.parse(JSON.stringify(item)) as Record<string, unknown>
-    ),
+    columnMetadata,
     dependencies,
   };
 }
