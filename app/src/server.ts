@@ -8,6 +8,7 @@ import * as db from './db';
 import { requireAuth } from './auth';
 import type { Deps } from './types';
 import { reconcileOrphanedSheetSafetyLocks, registerExecutionTasks } from './executionTasks';
+import { registerCleanupTasks } from './cleanupTasks';
 import { startProcessing } from './jobs';
 
 import registerAuthRoutes from './routes/auth.routes';
@@ -26,10 +27,12 @@ import registerCaptainImportRoutes from './routes/captainImport.routes';
 import registerZoneSheetRoutes from './routes/zoneSheets.routes';
 import registerOperationsRoutes from './routes/operations.routes';
 import registerAddressIntakeRoutes from './routes/addressIntake.routes';
+import registerFolderCleanupRoutes from './routes/folderCleanup.routes';
 
 export function createApp(): Express {
   db.init();
   registerExecutionTasks();
+  registerCleanupTasks();
   startProcessing();
   setTimeout(() => void reconcileOrphanedSheetSafetyLocks(), 65_000).unref();
 
@@ -60,6 +63,7 @@ export function createApp(): Express {
   registerZoneSheetRoutes(api, deps);
   registerOperationsRoutes(api, deps);
   registerAddressIntakeRoutes(api, deps);
+  registerFolderCleanupRoutes(api, deps);
   app.use('/api', api);
 
   // Static frontend. Prefer the built React app (app/web/dist); fall back to the

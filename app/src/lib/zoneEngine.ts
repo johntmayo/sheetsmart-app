@@ -414,8 +414,14 @@ export function planFolderZoneReconciliation(
   const lonIdx = headerIndex(headers, cfg.lonHeader);
   const zoneIdx = headerIndex(headers, cfg.zoneHeader || 'ZoneName');
   const displayAddressIdx = headerIndex(headers, 'Address');
-  const houseIdx = headerIndex(headers, 'House');
-  const streetIdx = headerIndex(headers, 'Street');
+  const houseIdx = headerIndex(headers, '_SitusHouseNo') !== -1
+    ? headerIndex(headers, '_SitusHouseNo')
+    : headerIndex(headers, 'House');
+  const directionIdx = headerIndex(headers, '_SitusDirection');
+  const streetIdx = headerIndex(headers, '_SitusStreet') !== -1
+    ? headerIndex(headers, '_SitusStreet')
+    : headerIndex(headers, 'Street');
+  const unitIdx = headerIndex(headers, '_SitusUnit');
   if (residentIdx === -1 || addressIdx === -1 || latIdx === -1 || lonIdx === -1) {
     plan.registryErrors.push('Master must contain resident_id, address_id, Latitude, and Longitude.');
     return plan;
@@ -488,7 +494,12 @@ export function planFolderZoneReconciliation(
       displayAddress:
         displayAddressIdx !== -1
           ? s(row[displayAddressIdx])
-          : [houseIdx === -1 ? '' : s(row[houseIdx]), streetIdx === -1 ? '' : s(row[streetIdx])]
+          : [
+              houseIdx === -1 ? '' : s(row[houseIdx]),
+              directionIdx === -1 ? '' : s(row[directionIdx]),
+              streetIdx === -1 ? '' : s(row[streetIdx]),
+              unitIdx === -1 ? '' : s(row[unitIdx]),
+            ]
               .filter(Boolean)
               .join(' '),
       masterRow: row,

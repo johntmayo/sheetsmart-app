@@ -58,8 +58,14 @@ export function planMissingZoneSheets(
   const latCol = headerIndex(headers, cfg.latHeader);
   const lonCol = headerIndex(headers, cfg.lonHeader);
   const addressDisplayCol = headerIndex(headers, 'Address');
-  const houseCol = headerIndex(headers, 'House');
-  const streetCol = headerIndex(headers, 'Street');
+  const houseCol = headerIndex(headers, '_SitusHouseNo') !== -1
+    ? headerIndex(headers, '_SitusHouseNo')
+    : headerIndex(headers, 'House');
+  const directionCol = headerIndex(headers, '_SitusDirection');
+  const streetCol = headerIndex(headers, '_SitusStreet') !== -1
+    ? headerIndex(headers, '_SitusStreet')
+    : headerIndex(headers, 'Street');
+  const unitCol = headerIndex(headers, '_SitusUnit');
   if (residentCol === -1 || addressCol === -1 || latCol === -1 || lonCol === -1) {
     plan.errors.push('Master must contain resident_id, address_id, Latitude, and Longitude.');
     return plan;
@@ -92,7 +98,12 @@ export function planMissingZoneSheets(
       displayAddress:
         addressDisplayCol !== -1
           ? text(row[addressDisplayCol])
-          : [houseCol === -1 ? '' : text(row[houseCol]), streetCol === -1 ? '' : text(row[streetCol])]
+          : [
+              houseCol === -1 ? '' : text(row[houseCol]),
+              directionCol === -1 ? '' : text(row[directionCol]),
+              streetCol === -1 ? '' : text(row[streetCol]),
+              unitCol === -1 ? '' : text(row[unitCol]),
+            ]
               .filter(Boolean)
               .join(' '),
       row: headers.map((_header, col) => row[col] ?? ''),

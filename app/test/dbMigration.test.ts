@@ -45,6 +45,8 @@ test('existing dictionaries migrate safely and mark sales fields master-only', a
     'Successfully Contacted',
   ];
   approvedBooleans.forEach((field, index) => insert.run(field, salesFields.length + index + 1));
+  insert.run('House', salesFields.length + approvedBooleans.length + 1);
+  insert.run('Street', salesFields.length + approvedBooleans.length + 2);
   legacy.close();
 
   process.env.DATABASE_PATH = databasePath;
@@ -70,12 +72,15 @@ test('existing dictionaries migrate safely and mark sales fields master-only', a
     .all(...approvedBooleans) as Array<{ canonical_name: string; data_type: string }>;
   assert.strictEqual(typed.length, approvedBooleans.length);
   assert.ok(typed.every((field) => field.data_type === 'checkbox'));
+  assert.strictEqual(migrated.find((field) => field.canonical_name === 'House')?.distribute_to_captain, 0);
+  assert.strictEqual(migrated.find((field) => field.canonical_name === 'Street')?.distribute_to_captain, 0);
   for (const table of [
     'deletion_operations',
     'deletion_archive_index',
     'resident_tombstones',
     'address_tombstones',
     'activity_events',
+    'cleanup_sheet_snapshots',
   ]) {
     assert.strictEqual(
       Boolean(connection.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?").get(table)),

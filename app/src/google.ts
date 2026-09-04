@@ -6,6 +6,7 @@
 import { google, sheets_v4, drive_v3 } from 'googleapis';
 import { config } from './config';
 import { assertCurrentJobLease } from './jobs';
+import type { CleanupCell, CleanupDependency, CleanupSheet } from './lib/folderCleanupEngine';
 
 // The service-account auth client, derived from googleapis so we don't depend
 // on google-auth-library directly.
@@ -252,6 +253,127 @@ export async function readHeaders(spreadsheetId: string, tabName?: string): Prom
   const rows = await readValues(spreadsheetId, range);
   const header = rows[0] || [];
   return header.map((h: unknown) => String(h == null ? '' : h).trim());
+}
+
+/**
+ * Read raw/effective/formatted values and the formatting/validation metadata
+ * needed by the folder-cleanup safety audit and its schema-specific Undo.
+ */
+export async function readCleanupSheet(
+  spreadsheetId: string,
+  tabName?: string,
+  knownName = ''
+): Promise<CleanupSheet> {
+  const { sheets } = getClients();
+  const meta = await getSpreadsheetMeta(spreadsheetId);
+  const tab = tabName || meta.tabs[0] || '';
+  if (!tab) throw new Error(`${knownName || meta.title || spreadsheetId} has no readable tab.`);
+  const res = await withRetry(() =>
+    sheets.spreadsheets.get({
+      spreadsheetId,
+      ranges: [quoteTabName(tab)],
+      includeGridData: true,
+      fields: [
+        'spreadsheetId',
+        'properties.title',
+        'namedRanges',
+        'sheets(properties(sheetId,title,gridProperties(rowCount,columnCount))',
+        'data.columnMetadata',
+        'data.rowData.values(userEnteredValue,effectiveValue,formattedValue,userEnteredFormat,effectiveFormat,dataValidation,note)',
+        'merges,conditionalFormats,protectedRanges,filterViews,basicFilter,charts)',
+      ].join(','),
+    })
+  );
+  const source = (res.data.sheets || []).find((item) => item.properties?.title === tab);
+  if (!source) throw new Error(`${knownName || meta.title || spreadsheetId} no longer has tab "${tab}".`);
+  const props = source.properties;
+  const rowCount = props?.gridProperties?.rowCount || 0;
+  const columnCount = props?.gridProperties?.columnCount || 0;
+  const rows = source.data?.[0]?.rowData || [];
+  const cells: CleanupCell[][] = rows.map((row) =>
+    (row.values || []).map((value) => ({
+      userEnteredValue: sheetExtendedValue(value.userEnteredValue),
+      effectiveValue: sheetExtendedValue(value.effectiveValue) as CleanupCell['effectiveValue'],
+      formattedValue: value.formattedValue ?? '',
+      numberFormat: (value.effectiveFormat?.numberFormat || value.userEnteredFormat?.numberFormat)
+        ? {
+            type: (value.effectiveFormat?.numberFormat || value.userEnteredFormat?.numberFormat)?.type || undefined,
+            pattern: (value.effectiveFormat?.numberFormat || value.userEnteredFormat?.numberFormat)?.pattern || undefined,
+          }
+        : undefined,
+      userEnteredFormat: value.userEnteredFormat
+        ? JSON.parse(JSON.stringify(value.userEnteredFormat)) as Record<string, unknown>
+        : undefined,
+      effectiveFormat: value.effectiveFormat
+        ? JSON.parse(JSON.stringify(value.effectiveFormat)) as Record<string, unknown>
+        : undefined,
+      dataValidation: value.dataValidation ? JSON.parse(JSON.stringify(value.dataValidation)) : undefined,
+      note: value.note || undefined,
+    }))
+  );
+  const dependencies: CleanupDependency[] = [];
+  if (cells.some((row) => row.some((cell) => cell.userEnteredValue && typeof cell.userEnteredValue === 'object'))) {
+    dependencies.push({
+      kind: 'formula',
+      detail: 'At least one formula exists on this tab; column-reference restoration cannot be guaranteed.',
+      startColumn: 0,
+      endColumn: columnCount,
+    });
+  }
+  const addRanges = (kind: string, values: unknown[] | undefined, rangeOf: (value: any) => any) => {
+    for (const value of values || []) {
+      const range = rangeOf(value);
+      if (!range || range.sheetId !== props?.sheetId) continue;
+      dependencies.push({
+        kind,
+        detail: `${kind} spans columns ${(range.startColumnIndex || 0) + 1}-${range.endColumnIndex || columnCount}.`,
+        startColumn: range.startColumnIndex || 0,
+        endColumn: range.endColumnIndex || columnCount,
+      });
+    }
+  };
+  addRanges('merged range', source.merges, (value) => value);
+  addRanges(
+    'conditional format',
+    (source.conditionalFormats || []).flatMap((value) => value.ranges || []),
+    (value) => value
+  );
+  addRanges('protected range', source.protectedRanges, (value) => value.range);
+  addRanges('filter view', source.filterViews, (value) => value.range);
+  if (source.basicFilter?.range) addRanges('basic filter', [source.basicFilter], (value) => value.range);
+  // Charts and named ranges can carry column references not represented as a
+  // single simple grid range. Blocking all candidate deletes is conservative.
+  if ((source.charts || []).length > 0 || (res.data.namedRanges || []).some((value) => value.range?.sheetId === props?.sheetId)) {
+    dependencies.push({
+      kind: 'named range or chart',
+      detail: 'A named range or chart may depend on this tab.',
+      startColumn: 0,
+      endColumn: columnCount,
+    });
+  }
+  return {
+    spreadsheetId,
+    spreadsheetName: knownName || res.data.properties?.title || meta.title,
+    tabName: tab,
+    sheetId: props?.sheetId || 0,
+    rowCount,
+    columnCount,
+    cells,
+    columnMetadata: (source.data?.[0]?.columnMetadata || []).map((item) =>
+      JSON.parse(JSON.stringify(item)) as Record<string, unknown>
+    ),
+    dependencies,
+  };
+}
+
+function sheetExtendedValue(value?: sheets_v4.Schema$ExtendedValue | null): CleanupCell['userEnteredValue'] {
+  if (!value) return null;
+  if (value.formulaValue != null) return { formulaValue: value.formulaValue };
+  if (value.boolValue != null) return value.boolValue;
+  if (value.numberValue != null) return value.numberValue;
+  if (value.stringValue != null) return value.stringValue;
+  if (value.errorValue != null) return String(value.errorValue.message || value.errorValue.type || '#ERROR!');
+  return null;
 }
 
 // ---- Write helpers (Phase C) ----

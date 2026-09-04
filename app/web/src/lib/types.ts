@@ -46,6 +46,8 @@ export interface RunSummary {
   unreverted_delete_count?: number;
   created_file_count?: number;
   unreverted_created_file_count?: number;
+  cleanup_snapshot_count?: number;
+  unreverted_cleanup_count?: number;
 }
 
 export interface StatusResponse {
@@ -458,6 +460,37 @@ export interface QueuedRunResponse {
   runId: number;
   jobId: number;
   status: 'queued';
+}
+
+export interface FolderCleanupSheetPreview {
+  spreadsheetName: string;
+  role: 'master' | 'captain';
+  tabName: string;
+  columnsToDelete: string[];
+  booleansToStandardize: number;
+  unitsToRepair: number;
+  cellChanges: Array<{ row: number; column: string; action: string }>;
+  formatUnitAsText: boolean;
+  blocks: Array<{ code: string; message: string; row?: number; column?: string }>;
+  canApply: boolean;
+}
+
+export interface FolderCleanupPreviewResponse {
+  runId: number;
+  generatedAt: string;
+  fingerprint: string;
+  totals: {
+    sheets: number;
+    sheetsChanging: number;
+    columnsDeleted: number;
+    booleansStandardized: number;
+    unitsRepaired: number;
+    unitColumnsFormatted: number;
+    blocks: number;
+  };
+  readErrors: Array<{ spreadsheet: string; reason: string }>;
+  sheets: FolderCleanupSheetPreview[];
+  canApply: boolean;
 }
 
 export interface FolderAddressMove {

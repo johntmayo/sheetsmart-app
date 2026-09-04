@@ -57,6 +57,7 @@ import {
   isMapboxConfigured,
 } from '../mapbox';
 import { detectSheetZone, findColumn } from '../lib/columns';
+import { FOLDER_CLEANUP_TASK, REVERT_FOLDER_CLEANUP_TASK } from '../cleanupTasks';
 
 const SAFE_COPY_TARGET_KEY = 'safe_copy_execution_target';
 const SAFE_COPY_MOVE_TARGET_KEY = 'safe_copy_move_target';
@@ -935,6 +936,17 @@ export default function registerSafeExecutionRoutes(api: Router, { db }: Deps): 
           `SELECT COUNT(*) AS n FROM run_snapshots
            WHERE run_id=? AND operation IN ('row_append','row_delete')
              AND reverted_by_run_id IS NULL`,
+          [originalRunId]
+        )?.n || 0;
+    } else if (original.type === FOLDER_CLEANUP_TASK) {
+      if (!['succeeded', 'failed', 'interrupted'].includes(original.status)) {
+        return res.status(409).json({ error: 'Wait for the cleanup run to finish before undoing it.' });
+      }
+      revertType = REVERT_FOLDER_CLEANUP_TASK;
+      remaining =
+        db.get<{ n: number }>(
+          `SELECT COUNT(*) AS n FROM cleanup_sheet_snapshots
+           WHERE run_id=? AND reverted_by_run_id IS NULL`,
           [originalRunId]
         )?.n || 0;
     } else {

@@ -222,8 +222,10 @@ export function buildMasterModel(masterGrid: Grid): MasterModel {
   const residentIdCol = rawHeaders.indexOf('resident_id');
   const zoneCol = rawHeaders.indexOf('ZoneName');
   const nameCol = rawHeaders.indexOf('Resident Name');
-  const houseCol = rawHeaders.indexOf('House');
-  const streetCol = rawHeaders.indexOf('Street');
+  const houseCol = preferredColumn(rawHeaders, '_SitusHouseNo', 'House');
+  const directionCol = rawHeaders.indexOf('_SitusDirection');
+  const streetCol = preferredColumn(rawHeaders, '_SitusStreet', 'Street');
+  const unitCol = rawHeaders.indexOf('_SitusUnit');
 
   const roster: Record<string, Record<string, true>> = {};
   const residents: Record<string, MasterResident> = {};
@@ -250,8 +252,10 @@ export function buildMasterModel(masterGrid: Grid): MasterModel {
     const zoneName = zoneCol !== -1 ? String(row[zoneCol] == null ? '' : row[zoneCol]).trim() : '';
     const name = nameCol !== -1 ? String(row[nameCol] == null ? '' : row[nameCol]).trim() : '';
     const house = houseCol !== -1 ? String(row[houseCol] == null ? '' : row[houseCol]).trim() : '';
+    const direction = directionCol !== -1 ? String(row[directionCol] == null ? '' : row[directionCol]).trim() : '';
     const street = streetCol !== -1 ? String(row[streetCol] == null ? '' : row[streetCol]).trim() : '';
-    const address = (house + ' ' + street).trim();
+    const unit = unitCol !== -1 ? String(row[unitCol] == null ? '' : row[unitCol]).trim() : '';
+    const address = [house, direction, street, unit].filter(Boolean).join(' ');
 
     residents[residentId] = { zoneName, name, address, masterRow: i + 1 };
 
@@ -359,8 +363,10 @@ function computeRowMembership(
   if (residentIdCol === -1) return result;
 
   const nameCol = headers.indexOf('Resident Name');
-  const houseCol = headers.indexOf('House');
-  const streetCol = headers.indexOf('Street');
+  const houseCol = preferredColumn(headers, '_SitusHouseNo', 'House');
+  const directionCol = headers.indexOf('_SitusDirection');
+  const streetCol = preferredColumn(headers, '_SitusStreet', 'Street');
+  const unitCol = headers.indexOf('_SitusUnit');
 
   const userIds: Record<string, { row: number; name: string; address: string }> = {};
   for (let r = 0; r < dataRows.length; r++) {
@@ -369,8 +375,10 @@ function computeRowMembership(
     if (id === '' || id === 'undefined' || id === 'null') continue;
     const uName = nameCol !== -1 ? String(row[nameCol] == null ? '' : row[nameCol]).trim() : '';
     const uHouse = houseCol !== -1 ? String(row[houseCol] == null ? '' : row[houseCol]).trim() : '';
+    const uDirection = directionCol !== -1 ? String(row[directionCol] == null ? '' : row[directionCol]).trim() : '';
     const uStreet = streetCol !== -1 ? String(row[streetCol] == null ? '' : row[streetCol]).trim() : '';
-    userIds[id] = { row: r + 2, name: uName, address: (uHouse + ' ' + uStreet).trim() };
+    const uUnit = unitCol !== -1 ? String(row[unitCol] == null ? '' : row[unitCol]).trim() : '';
+    userIds[id] = { row: r + 2, name: uName, address: [uHouse, uDirection, uStreet, uUnit].filter(Boolean).join(' ') };
   }
 
   const expectedIds = master.roster[assignedZone] || {};
@@ -485,6 +493,11 @@ function buildAddressKey(address: string, source: string): AddressKey {
     displayAddress: normalized,
     source: normalized === '' ? '' : source,
   };
+}
+
+function preferredColumn(headers: string[], canonical: string, legacy: string): number {
+  const canonicalIndex = headers.indexOf(canonical);
+  return canonicalIndex !== -1 ? canonicalIndex : headers.indexOf(legacy);
 }
 
 function addressKeyForRow(headers: string[], row: CellValue[]): AddressKey {

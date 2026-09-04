@@ -114,6 +114,25 @@ CREATE INDEX IF NOT EXISTS idx_snapshot_run ON run_snapshots(run_id);
 CREATE INDEX IF NOT EXISTS idx_snapshot_identity
   ON run_snapshots(spreadsheet_id, tab_name, resident_id);
 
+-- Folder cleanup snapshots preserve whole affected columns as Sheets CellData,
+-- including values, formats, notes, and validation. One record per sheet lets
+-- Undo remain atomic and conservatively refuse a sheet changed afterward.
+CREATE TABLE IF NOT EXISTS cleanup_sheet_snapshots (
+  id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id             INTEGER NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+  spreadsheet_id     TEXT NOT NULL,
+  spreadsheet_name   TEXT NOT NULL DEFAULT '',
+  tab_name            TEXT NOT NULL,
+  sheet_id            INTEGER NOT NULL,
+  folder_id           TEXT NOT NULL DEFAULT '',
+  before_json         TEXT NOT NULL,
+  after_json          TEXT NOT NULL,
+  reverted_by_run_id  INTEGER REFERENCES runs(id) ON DELETE SET NULL,
+  created_at          TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE(run_id, spreadsheet_id, tab_name)
+);
+CREATE INDEX IF NOT EXISTS idx_cleanup_snapshot_run ON cleanup_sheet_snapshots(run_id);
+
 -- Files created by SheetSmart (currently missing captain-zone sheets). Their
 -- post-create modified time lets Undo preserve any file humans edited later.
 CREATE TABLE IF NOT EXISTS run_created_files (
@@ -298,6 +317,7 @@ export function init(): Database.Database {
   seedDictionaryIfEmpty();
   ensureDeletionMarkerField();
   applySalesOwnershipLock();
+  applyAddressDistributionScopeV2();
   applyPrivacyClassificationV1();
   applyApprovedBooleanTypesV1();
   redactHistoricalSensitiveLogsV1();
@@ -400,6 +420,21 @@ function applySalesOwnershipLock(): void {
         WHERE canonical_name IN (${ZONE_DASHBOARD_SALES_FIELDS.map(() => '?').join(',')})`
     )
     .run(ZONE_DASHBOARD_SALES_NOTE, ...ZONE_DASHBOARD_SALES_FIELDS);
+}
+
+// Canonical House and Street are master-only. Captain sheets use the canonical
+// _Situs fields after the dedicated cleanup has verified every eligible row.
+function applyAddressDistributionScopeV2(): void {
+  const conn = getDb();
+  const key = 'captain_distribution_scope_v2';
+  if (conn.prepare('SELECT value FROM app_settings WHERE key=?').get(key)) return;
+  const tx = conn.transaction(() => {
+    conn
+      .prepare(`UPDATE dictionary_fields SET distribute_to_captain=0 WHERE canonical_name IN ('House','Street')`)
+      .run();
+    conn.prepare('INSERT INTO app_settings (key, value) VALUES (?, ?)').run(key, new Date().toISOString());
+  });
+  tx();
 }
 
 // One-time classification of resident PII, casework notes, and sensitive

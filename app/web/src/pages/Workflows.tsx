@@ -22,10 +22,7 @@ import { FolderReconcilePlaybook } from '../components/FolderReconcilePlaybook';
 import { CaptainImportPlaybook } from '../components/CaptainImportPlaybook';
 import { ZoneSheetsPlaybook } from '../components/ZoneSheetsPlaybook';
 import { AddressIntakePlaybook } from '../components/AddressIntakePlaybook';
-
-const UPCOMING = [
-  { title: 'Rename or remove a column everywhere' },
-];
+import { FolderCleanupPlaybook } from '../components/FolderCleanupPlaybook';
 
 function previewDescription(key: string): string {
   if (key === 'push_master') return 'Shows which resident and non-sales cells would be filled from the master. Zone Dashboard-owned sales fields are excluded.';
@@ -98,6 +95,14 @@ export function Workflows() {
       </p>
       <AddressIntakePlaybook />
 
+      <div className="section-head" style={{ marginTop: 32 }}>
+        <h2>Occasional folder maintenance</h2>
+      </div>
+      <p className="reading-copy" style={{ marginTop: 0 }}>
+        Use this dedicated cleanup only after reviewing its complete master-and-captain audit.
+      </p>
+      <FolderCleanupPlaybook />
+
       <details style={{ marginTop: 28 }}>
         <summary className="reading-copy" style={{ cursor: 'pointer' }}>
           Practice on copy spreadsheets (testing only)
@@ -123,23 +128,6 @@ export function Workflows() {
             <div className="btn-row" style={{ marginTop: 12 }}>
               <button className="btn" onClick={() => runPreview(p)}>
                 Preview changes
-              </button>
-            </div>
-          </div>
-        ))}
-      </div>
-
-      <div className="section-head" style={{ marginTop: 32 }}>
-        <h2>Planned</h2>
-      </div>
-      <div className="card-grid">
-        {UPCOMING.map((p) => (
-          <div className="card" key={p.title}>
-            <h3>{p.title}</h3>
-            <div className="card-meta">This workflow is not available yet.</div>
-            <div className="btn-row" style={{ marginTop: 12 }}>
-              <button className="btn secondary small" disabled title="Preview for this playbook is coming in a later step">
-                Not available yet
               </button>
             </div>
           </div>

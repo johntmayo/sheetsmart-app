@@ -55,7 +55,7 @@ const CHECKBOX = new Set([
   ...APPROVED_BOOLEAN_FIELDS,
 ]);
 const TEXT_SAFE = new Set(['APN', 'resident_id', 'address_id', 'Zip', '_SitusUnit']);
-const MASTER_ONLY = new Set<string>(ZONE_DASHBOARD_SALES_FIELDS);
+const MASTER_ONLY = new Set<string>([...ZONE_DASHBOARD_SALES_FIELDS, 'House', 'Street']);
 const SENSITIVE = new Set([
   'Age',
   'Gender',

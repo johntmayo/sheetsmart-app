@@ -258,6 +258,9 @@ function undoWarning(type: string): string {
   if (type === 'folder_zone_reconcile') {
     return 'SheetSmart will reverse the approved master updates and captain-sheet moves only where rows and cells still match this run. Later human edits are preserved and flagged for review.';
   }
+  if (type === 'folder_wide_cleanup') {
+    return 'SheetSmart will restore each sheet only if its cleaned columns, booleans, and units still match this run. Sheets edited afterward are preserved and reported.';
+  }
   if (type === 'apply_dashboard_deletion') {
     return 'SheetSmart will clear this run’s deletion markers where they are still unchanged, making those archived rows active again. Later edits are preserved for review.';
   }
@@ -281,6 +284,9 @@ function runTypeLabel(type: string): string {
     preview_folder_captain_import: 'Preview captain additions',
     folder_zone_reconcile: 'Move residents between zones',
     preview_folder_zone_reconcile: 'Preview boundary changes',
+    folder_wide_cleanup: 'Folder-wide cleanup',
+    preview_folder_wide_cleanup: 'Preview folder cleanup',
+    revert_folder_wide_cleanup: 'Undo folder cleanup',
     push_missing_copy: 'Practice: add missing residents',
     enrich_zones_copy: 'Practice: fill zone details',
     move_residents_copy: 'Practice: move residents',
@@ -308,6 +314,9 @@ function undoScope(type: string): string {
   if (type === 'folder_zone_reconcile') {
     return 'This affects the real master and the real captain sheets included in that approved reconciliation.';
   }
+  if (type === 'folder_wide_cleanup') {
+    return 'This restores deleted columns with their values, formats, and validation, plus retained unit and boolean changes, one safe sheet at a time.';
+  }
   if (type === 'apply_dashboard_deletion') {
     return 'This restores rows marked as deleted in the master and captain sheets by this run.';
   }
@@ -331,6 +340,7 @@ function undoButtonLabel(type: string): string {
   if (type === 'folder_captain_import') return 'Undo the captain import';
   if (type === 'address_intake') return 'Undo the address intake';
   if (type === 'folder_zone_reconcile') return 'Undo the reconciliation';
+  if (type === 'folder_wide_cleanup') return 'Undo the folder cleanup';
   if (type === 'apply_dashboard_deletion') return 'Restore deleted records';
   if (type === 'enrich_zones_copy') return 'Undo the enriched cells';
   if (type === 'move_residents_copy') return 'Undo the resident moves';
@@ -354,6 +364,9 @@ function canUndo(run: RunSummary): boolean {
       (run.unreverted_delete_count ?? 0) +
       (run.unreverted_cell_count ?? 0);
     return settled && remaining > 0;
+  }
+  if (run.type === 'folder_wide_cleanup') {
+    return settled && (run.unreverted_cleanup_count ?? 0) > 0;
   }
   if (run.type === 'apply_dashboard_deletion') {
     const remaining =
@@ -392,6 +405,9 @@ function isReverted(run: RunSummary): boolean {
       (run.unreverted_cell_count ?? 0) === 0
     );
   }
+  if (run.type === 'folder_wide_cleanup') {
+    return (run.cleanup_snapshot_count ?? 0) > 0 && (run.unreverted_cleanup_count ?? 0) === 0;
+  }
   if (run.type === 'apply_dashboard_deletion') {
     return (
       (run.unreverted_append_count ?? 0) === 0 &&
@@ -427,6 +443,12 @@ function runResult(run: RunSummary): string {
     if (typeof summary.addressesChanged === 'number') {
       const residents = typeof summary.residentsMoved === 'number' ? summary.residentsMoved : 0;
       return `${summary.addressesChanged} address(es), ${residents} resident row(s) reconciled`;
+    }
+    if (typeof summary.sheetsChanged === 'number' && typeof summary.columnsDeleted === 'number') {
+      return `${summary.sheetsChanged} sheet(s) cleaned, ${summary.columnsDeleted} column(s) removed`;
+    }
+    if (typeof summary.restoredSheets === 'number') {
+      return `${summary.restoredSheets} sheet(s) restored`;
     }
     if (typeof summary.moved === 'number') return `${summary.moved} resident(s) moved`;
     if (typeof summary.restoredToSource === 'number' || typeof summary.deletedFromDest === 'number') {

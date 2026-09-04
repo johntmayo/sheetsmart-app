@@ -369,8 +369,8 @@ export function planPullNewResidents(
   const captainName = columnReader(captainHeaders, nameColumn);
   const captainApn = columnReader(captainHeaders, apnColumn);
   const captainEmail = columnReader(captainHeaders, emailColumn);
-  const houseReader = columnReader(captainHeaders, 'House', '_SitusHouseNo');
-  const streetReader = columnReader(captainHeaders, 'Street', '_SitusStreet');
+  const houseReader = columnReader(captainHeaders, '_SitusHouseNo', 'House');
+  const streetReader = columnReader(captainHeaders, '_SitusStreet', 'Street');
 
   // In-batch duplicates matter too: the same person can appear twice in the
   // rows a captain appended.

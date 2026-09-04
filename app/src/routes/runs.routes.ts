@@ -25,6 +25,10 @@ export default function registerRunRoutes(api: Router, { db }: Deps): void {
                  WHERE f.run_id = runs.id) AS created_file_count,
                 (SELECT COUNT(*) FROM run_created_files f
                  WHERE f.run_id = runs.id AND f.reverted_by_run_id IS NULL) AS unreverted_created_file_count
+               ,(SELECT COUNT(*) FROM cleanup_sheet_snapshots c
+                 WHERE c.run_id = runs.id) AS cleanup_snapshot_count
+               ,(SELECT COUNT(*) FROM cleanup_sheet_snapshots c
+                 WHERE c.run_id = runs.id AND c.reverted_by_run_id IS NULL) AS unreverted_cleanup_count
          FROM runs ORDER BY id DESC LIMIT 200`
       )
     );
@@ -45,6 +49,15 @@ export default function registerRunRoutes(api: Router, { db }: Deps): void {
        FROM run_snapshots WHERE run_id = ? GROUP BY operation`,
       [req.params.id]
     );
+    const cleanupSnapshot = db.get<{ n: number; remaining: number }>(
+      `SELECT COUNT(*) AS n,
+              SUM(CASE WHEN reverted_by_run_id IS NULL THEN 1 ELSE 0 END) AS remaining
+       FROM cleanup_sheet_snapshots WHERE run_id=?`,
+      [req.params.id]
+    );
+    if (cleanupSnapshot?.n) {
+      snapshotCounts.push({ operation: 'sheet_cleanup', n: cleanupSnapshot.n, remaining: cleanupSnapshot.remaining });
+    }
     res.json({ run, job, typeCounts, snapshotCounts });
   });
 
