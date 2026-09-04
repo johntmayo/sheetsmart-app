@@ -6,7 +6,13 @@
 import { google, sheets_v4, drive_v3 } from 'googleapis';
 import { config } from './config';
 import { assertCurrentJobLease } from './jobs';
-import type { CleanupCell, CleanupDependency, CleanupSheet } from './lib/folderCleanupEngine';
+import {
+  LEGACY_ADDRESS_COLUMNS,
+  RETIRED_SALES_COLUMNS,
+  type CleanupCell,
+  type CleanupDependency,
+  type CleanupSheet,
+} from './lib/folderCleanupEngine';
 
 // The service-account auth client, derived from googleapis so we don't depend
 // on google-auth-library directly.
@@ -312,35 +318,29 @@ export async function readCleanupSheet(
     }))
   );
   const dependencies: CleanupDependency[] = [];
-  const formulaAudit = await withRetry(() =>
-    sheets.spreadsheets.get({
-      spreadsheetId,
-      includeGridData: true,
-      fields: 'sheets(properties(title),data.rowData.values(userEnteredValue.formulaValue))',
-    })
+  const selectedTabHasFormula = cells.some((row) =>
+    row.some((cell) => cell.userEnteredValue && typeof cell.userEnteredValue === 'object')
   );
-  for (const auditSheet of formulaAudit.data.sheets || []) {
-    const hasFormula = (auditSheet.data || []).some((grid) =>
-      (grid.rowData || []).some((row) =>
-        (row.values || []).some((cell) => Boolean(cell.userEnteredValue?.formulaValue))
-      )
-    );
-    if (hasFormula) {
-      dependencies.push({
-        kind: 'formula',
-        detail: `Formula cells exist on tab "${auditSheet.properties?.title || 'unknown'}"; cross-tab references cannot be restored safely.`,
-        startColumn: 0,
-        endColumn: columnCount,
-      });
-    }
-  }
-  if (cells.some((row) => row.some((cell) => cell.userEnteredValue && typeof cell.userEnteredValue === 'object'))) {
+  if (selectedTabHasFormula) {
     dependencies.push({
       kind: 'formula',
       detail: 'At least one formula exists on this tab; column-reference restoration cannot be guaranteed.',
       startColumn: 0,
       endColumn: columnCount,
     });
+  }
+  const structuralHeaders = new Set<string>([...LEGACY_ADDRESS_COLUMNS, ...RETIRED_SALES_COLUMNS]);
+  const selectedHeaders = (cells[0] || []).map((cell) => String(cell.formattedValue || '').trim());
+  if (!selectedTabHasFormula && selectedHeaders.some((header) => structuralHeaders.has(header))) {
+    const formulaTab = await findFormulaOnOtherTab(spreadsheetId, tab);
+    if (formulaTab) {
+      dependencies.push({
+        kind: 'formula',
+        detail: `Formula cells exist on tab "${formulaTab}"; cross-tab references cannot be restored safely.`,
+        startColumn: 0,
+        endColumn: columnCount,
+      });
+    }
   }
   const addRanges = (kind: string, values: unknown[] | undefined, rangeOf: (value: any) => any) => {
     for (const value of values || []) {
@@ -386,6 +386,31 @@ export async function readCleanupSheet(
     ),
     dependencies,
   };
+}
+
+async function findFormulaOnOtherTab(spreadsheetId: string, selectedTab: string): Promise<string | null> {
+  const { sheets } = getClients();
+  const properties = await getSheetProperties(spreadsheetId);
+  const rowsPerRequest = 1000;
+  for (const property of properties) {
+    if (property.title === selectedTab || property.rowCount <= 0 || property.columnCount <= 0) continue;
+    const endColumn = columnLetter(property.columnCount - 1);
+    for (let startRow = 1; startRow <= property.rowCount; startRow += rowsPerRequest) {
+      const endRow = Math.min(property.rowCount, startRow + rowsPerRequest - 1);
+      const response = await withRetry(() =>
+        sheets.spreadsheets.values.get({
+          spreadsheetId,
+          range: a1Range(property.title, `A${startRow}:${endColumn}${endRow}`),
+          valueRenderOption: 'FORMULA',
+        })
+      );
+      const hasFormula = (response.data.values || []).some((row) =>
+        row.some((value) => typeof value === 'string' && value.startsWith('='))
+      );
+      if (hasFormula) return property.title;
+    }
+  }
+  return null;
 }
 
 function sheetExtendedValue(value?: sheets_v4.Schema$ExtendedValue | null): CleanupCell['userEnteredValue'] {
