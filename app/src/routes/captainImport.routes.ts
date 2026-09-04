@@ -1,5 +1,6 @@
 import type { Request, Response, Router } from 'express';
 import type { Deps } from '../types';
+import * as appDb from '../db';
 import * as google from '../google';
 import * as jobs from '../jobs';
 import {
@@ -104,7 +105,10 @@ export default function registerCaptainImportRoutes(api: Router, { db }: Deps): 
 
       // Address-only placeholder rows are valid in the real data model. The
       // two actual safety requirements are resident_id and address_id.
-      const plan = planPullNewResidentsFromFolder(canonicalMaster, captainSheets, { requiredColumns: [] });
+      const plan = planPullNewResidentsFromFolder(canonicalMaster, captainSheets, {
+        requiredColumns: [],
+        forbiddenColumns: appDb.zoneDashboardSalesHeaders(),
+      });
       const residents = plan.addresses.reduce((sum, address) => sum + address.residents.length, 0);
       const summary: StoredPreview = {
         kind: 'folder_captain_import_preview',

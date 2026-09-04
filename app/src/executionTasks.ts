@@ -287,7 +287,9 @@ async function pullNewResidentsCopy(ctx: JobContext): Promise<unknown> {
   const tombstones = loadActiveTombstones(db);
   const filteredMaster = filterGridByTombstones(masterGrid, tombstones);
   const filteredCaptain = filterGridByTombstones(captainGrid, tombstones);
-  const plan = planPullNewResidents(filteredMaster, filteredCaptain);
+  const plan = planPullNewResidents(filteredMaster, filteredCaptain, {
+    forbiddenColumns: db.zoneDashboardSalesHeaders(),
+  });
   if (plan.errors.length > 0) throw new Error(plan.errors.join('; '));
 
   const approvedSet = new Set(approvedIds);
@@ -3514,7 +3516,10 @@ async function folderCaptainImport(ctx: JobContext): Promise<unknown> {
       grid: filterGridByTombstones([headerResult.headers, ...sheet.grid.slice(1)] as Grid, tombstones),
     };
   });
-  const fresh = planPullNewResidentsFromFolder(canonicalMaster, captainSheets, { requiredColumns: [] });
+  const fresh = planPullNewResidentsFromFolder(canonicalMaster, captainSheets, {
+    requiredColumns: [],
+    forbiddenColumns: db.zoneDashboardSalesHeaders(),
+  });
   if (fresh.errors.length > 0) throw new Error(fresh.errors.join('; '));
   const approvedSet = new Set(approvedAddressIds);
   const addresses = fresh.addresses.filter((address) => approvedSet.has(address.addressId));

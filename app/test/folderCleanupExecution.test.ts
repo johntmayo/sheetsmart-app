@@ -154,3 +154,42 @@ test('Undo blocks a sheet changed after cleanup and accepts the exact post-state
   current.cells[1][2].userEnteredValue = false;
   assert.match(undoSafetyProblem(current, snapshot) || '', /boolean cell changed/);
 });
+
+test('Undo blocks edits to unit cells that cleanup did not otherwise change', () => {
+  const snapshot: CleanupSnapshot = {
+    version: 1,
+    folderId: 'folder',
+    role: 'captain',
+    rowCount: 3,
+    columnCount: 2,
+    headersBefore: ['address_id', '_SitusUnit'],
+    headersAfter: ['address_id', '_SitusUnit'],
+    deleted: [],
+    booleans: [],
+    unit: {
+      colIndex: 1,
+      before: [
+        { userEnteredValue: '_SitusUnit' },
+        { userEnteredValue: '2A' },
+        { userEnteredValue: '3B' },
+      ],
+      changes: [],
+      expectedAfter: ['_SitusUnit', '2A', '3B'],
+    },
+  };
+  const current: CleanupSheet = {
+    spreadsheetId: 'sheet',
+    spreadsheetName: 'Captain',
+    tabName: 'Data',
+    sheetId: 77,
+    rowCount: 3,
+    columnCount: 2,
+    cells: [
+      [{ userEnteredValue: 'address_id' }, { userEnteredValue: '_SitusUnit', numberFormat: { type: 'TEXT' } }],
+      [{ userEnteredValue: 'a1' }, { userEnteredValue: '2A', numberFormat: { type: 'TEXT' } }],
+      [{ userEnteredValue: 'a2' }, { userEnteredValue: 'edited', numberFormat: { type: 'TEXT' } }],
+    ],
+  };
+
+  assert.match(undoSafetyProblem(current, snapshot) || '', /unit cell changed.*row 3/);
+});

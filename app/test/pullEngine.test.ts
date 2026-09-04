@@ -243,6 +243,20 @@ test('planPullNewResidents: blanks legacy captain sales values in new master row
   assert.strictEqual(plan.candidates[0].filledColumns, 3);
 });
 
+test('planPullNewResidents: dictionary sales aliases are also blanked', () => {
+  const master: Grid = [['resident_id', 'Resident Name', 'Sale Amount Alias']];
+  const captain: Grid = [
+    ['resident_id', 'Resident Name', 'Sale Amount Alias'],
+    ['C9', 'New Person', '999999'],
+  ];
+
+  const plan = planPullNewResidents(master, captain, {
+    forbiddenColumns: ['Latest Sale Price', 'Sale Amount Alias'],
+  });
+
+  assert.deepStrictEqual(plan.candidates[0].row, ['C9', 'New Person', '']);
+});
+
 test('planPullNewResidents: a shared APN alone is never a duplicate signal', () => {
   const captain: Grid = [
     ['resident_id', 'Resident Name', 'APN', 'House', 'Street', 'Email'],

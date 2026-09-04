@@ -324,6 +324,23 @@ export function init(): Database.Database {
   return db;
 }
 
+export function zoneDashboardSalesHeaders(): string[] {
+  const placeholders = ZONE_DASHBOARD_SALES_FIELDS.map(() => '?').join(',');
+  const rows = getDb()
+    .prepare(
+      `SELECT df.canonical_name AS name
+       FROM dictionary_fields df
+       WHERE df.canonical_name IN (${placeholders})
+       UNION
+       SELECT da.alias AS name
+       FROM dictionary_aliases da
+       JOIN dictionary_fields df ON df.id=da.field_id
+       WHERE df.canonical_name IN (${placeholders})`
+    )
+    .all(...ZONE_DASHBOARD_SALES_FIELDS, ...ZONE_DASHBOARD_SALES_FIELDS) as Array<{ name: string }>;
+  return rows.map((row) => row.name);
+}
+
 function ensureDeletionMarkerField(): void {
   const conn = getDb();
   if (conn.prepare("SELECT id FROM dictionary_fields WHERE canonical_name='Deleted Record'").get()) return;

@@ -1,5 +1,6 @@
 import type { Request, Response, Router } from 'express';
 import type { Deps } from '../types';
+import * as appDb from '../db';
 import * as google from '../google';
 import * as jobs from '../jobs';
 import {
@@ -454,7 +455,8 @@ export default function registerSafeExecutionRoutes(api: Router, { db }: Deps): 
       const tombstones = loadActiveTombstones(db);
       const plan = planPullNewResidents(
         filterGridByTombstones(masterGrid, tombstones),
-        filterGridByTombstones(captainGrid, tombstones)
+        filterGridByTombstones(captainGrid, tombstones),
+        { forbiddenColumns: appDb.zoneDashboardSalesHeaders() }
       );
       if (plan.errors.length > 0) throw new Error(plan.errors.join('; '));
 

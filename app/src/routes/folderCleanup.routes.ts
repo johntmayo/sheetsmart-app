@@ -39,6 +39,9 @@ export default function registerFolderCleanupRoutes(api: Router, { db }: Deps): 
     const runId = Number(inserted.lastInsertRowid);
     try {
       const files = await google.listSpreadsheetsInFolder(folder.google_id);
+      if (files.some((file) => file.id === master.google_id)) {
+        throw new Error('The master spreadsheet cannot also be inside the captain folder.');
+      }
       const masterSheet = await google.readCleanupSheet(master.google_id, master.source_tab || undefined, master.name);
       const captains: CleanupSheet[] = [];
       const readErrors: Array<{ spreadsheet: string; reason: string }> = [];

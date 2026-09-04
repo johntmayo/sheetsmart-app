@@ -14,6 +14,7 @@ const date: FieldCompareMeta = { dataType: 'date' };
 const checkbox: FieldCompareMeta = { dataType: 'checkbox' };
 const text: FieldCompareMeta = { dataType: 'text' };
 const textSafe: FieldCompareMeta = { dataType: 'text', isTextSafe: true };
+const number: FieldCompareMeta = { dataType: 'number' };
 
 test('declared dates compare Google serials to calendar text in UTC', () => {
   assert.strictEqual(cellValuesEqual(46211, '7/8/2026', date), true);
@@ -49,4 +50,12 @@ test('text-safe identifiers preserve text and flag numeric raw values', () => {
   assert.strictEqual(cellValuesEqual('1/2', '1/2', textSafe), true);
   assert.strictEqual(isSuspectedTextCoercion(46211, textSafe), true);
   assert.strictEqual(isSuspectedTextCoercion('46211', textSafe), false);
+});
+
+test('numeric comparison preserves precision and normalizes decimal spelling safely', () => {
+  assert.strictEqual(cellValuesEqual('001.2300', '1.23', number), true);
+  assert.strictEqual(cellValuesEqual(1e-7, '0.0000001', number), true);
+  assert.strictEqual(cellValuesEqual(1e-7, 2e-7, number), false);
+  assert.strictEqual(cellValuesEqual('9007199254740992', '9007199254740993', number), false);
+  assert.strictEqual(cellValuesEqual(9007199254740992, '9007199254740992', number), false);
 });

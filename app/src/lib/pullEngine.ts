@@ -296,6 +296,8 @@ export interface NewResidentsOptions {
   phoneColumns?: string[];
   /** Columns a new master row must carry to be proposed at all. */
   requiredColumns?: string[];
+  /** Canonical headers and dictionary aliases that must never be imported. */
+  forbiddenColumns?: string[];
 }
 
 /**
@@ -439,7 +441,7 @@ export function planPullNewResidents(
     }
     if (emailKey && !batchByEmail.has(emailKey)) batchByEmail.set(emailKey, residentId);
 
-    const mapped = remapToMasterHeaders(cells, captainHeaders, masterHeaders);
+    const mapped = remapToMasterHeaders(cells, captainHeaders, masterHeaders, options.forbiddenColumns);
     const missingRequired = requiredColumns.filter((column) => {
       const index = masterHeaders.indexOf(column);
       return index === -1 || text(mapped[index]) === '';
@@ -692,14 +694,20 @@ export function folderNewResidentsFingerprint(addresses: FolderNewAddress[]): st
 function remapToMasterHeaders(
   cells: CellValue[],
   captainHeaders: string[],
-  masterHeaders: string[]
+  masterHeaders: string[],
+  forbiddenColumns: string[] = []
 ): CellValue[] {
   const byHeader = new Map<string, CellValue>();
+  const forbidden = new Set(forbiddenColumns.map((header) => String(header).trim().toLocaleLowerCase()));
   captainHeaders.forEach((header, index) => {
     if (header && !byHeader.has(header)) byHeader.set(header, cells[index]);
   });
   return masterHeaders.map((header) =>
-    header && !isZoneDashboardSalesField(header) ? (byHeader.get(header) ?? '') : ''
+    header &&
+    !isZoneDashboardSalesField(header) &&
+    !forbidden.has(header.trim().toLocaleLowerCase())
+      ? (byHeader.get(header) ?? '')
+      : ''
   );
 }
 

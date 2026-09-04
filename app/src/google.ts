@@ -312,6 +312,28 @@ export async function readCleanupSheet(
     }))
   );
   const dependencies: CleanupDependency[] = [];
+  const formulaAudit = await withRetry(() =>
+    sheets.spreadsheets.get({
+      spreadsheetId,
+      includeGridData: true,
+      fields: 'sheets(properties(title),data.rowData.values(userEnteredValue.formulaValue))',
+    })
+  );
+  for (const auditSheet of formulaAudit.data.sheets || []) {
+    const hasFormula = (auditSheet.data || []).some((grid) =>
+      (grid.rowData || []).some((row) =>
+        (row.values || []).some((cell) => Boolean(cell.userEnteredValue?.formulaValue))
+      )
+    );
+    if (hasFormula) {
+      dependencies.push({
+        kind: 'formula',
+        detail: `Formula cells exist on tab "${auditSheet.properties?.title || 'unknown'}"; cross-tab references cannot be restored safely.`,
+        startColumn: 0,
+        endColumn: columnCount,
+      });
+    }
+  }
   if (cells.some((row) => row.some((cell) => cell.userEnteredValue && typeof cell.userEnteredValue === 'object'))) {
     dependencies.push({
       kind: 'formula',

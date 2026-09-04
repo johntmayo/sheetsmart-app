@@ -3,6 +3,7 @@ import * as db from './db';
 import * as google from './google';
 import { registerTask, type JobContext } from './jobs';
 import {
+  cleanupInputFingerprint,
   planFolderCleanup,
   type CleanupCell,
   type CleanupCellChange,
@@ -40,6 +41,7 @@ export interface CleanupSnapshot {
     colIndex: number;
     before: CleanupCell[];
     changes: Array<{ row: number; afterValue: unknown }>;
+    expectedAfter?: unknown[];
   };
 }
 
@@ -63,6 +65,9 @@ async function executeFolderCleanup(ctx: JobContext): Promise<unknown> {
   requireLive(ctx);
   const params = cleanupParams(ctx.params);
   const files = await google.listSpreadsheetsInFolder(params.folderId);
+  if (files.some((file) => file.id === params.masterSpreadsheetId)) {
+    throw new Error('The master spreadsheet cannot also be inside the captain folder.');
+  }
   const captains = await readCaptains(files);
   const master = await google.readCleanupSheet(params.masterSpreadsheetId, params.masterTab, params.masterName);
   const fresh = planFolderCleanup(master, captains);
@@ -75,14 +80,21 @@ async function executeFolderCleanup(ctx: JobContext): Promise<unknown> {
   let columnsDeleted = 0;
   let booleansStandardized = 0;
   let unitsRepaired = 0;
-  const byId = new Map([master, ...captains].map((sheet) => [sheet.spreadsheetId, sheet]));
   const ordered = fresh.sheets.filter((sheet) => sheet.canApply);
   for (let index = 0; index < ordered.length; index++) {
     ctx.assertLease();
     const plan = ordered[index];
     if (plan.role === 'captain') await assertFolderMember(params.folderId, plan.spreadsheetId);
-    const current = byId.get(plan.spreadsheetId);
-    if (!current) throw new Error(`${plan.spreadsheetName} disappeared before cleanup.`);
+    const current = await google.readCleanupSheet(
+      plan.spreadsheetId,
+      plan.tabName,
+      plan.spreadsheetName
+    );
+    if (cleanupInputFingerprint(current) !== plan.inputFingerprint) {
+      throw new Error(
+        `${plan.spreadsheetName} changed while cleanup was running. It was not modified; run a fresh preview.`
+      );
+    }
     const snapshot = buildSnapshot(current, plan, params.folderId);
     const requests = applyRequests(plan, current.rowCount);
     db.run(
@@ -264,6 +276,10 @@ function buildSnapshot(sheet: CleanupSheet, plan: CleanupSheetPlan, folderId: st
           colIndex: plan.formatUnitColumn,
           before: column(plan.formatUnitColumn),
           changes: plan.unitChanges.map((change) => ({ row: change.row, afterValue: change.afterValue })),
+          expectedAfter: Array.from({ length: sheet.rowCount }, (_unused, row) => {
+            const changed = plan.unitChanges.find((change) => change.row === row + 1);
+            return changed ? changed.afterValue : primitive(sheet.cells[row]?.[plan.formatUnitColumn!] || {});
+          }),
         },
   };
 }
@@ -281,9 +297,13 @@ export function undoSafetyProblem(current: CleanupSheet, snapshot: CleanupSnapsh
   }
   if (snapshot.unit) {
     const index = postIndex(snapshot.unit.colIndex, snapshot.deleted);
-    for (const change of snapshot.unit.changes) {
-      if (primitive(current.cells[change.row - 1]?.[index] || {}) !== change.afterValue) {
-        return `a repaired unit changed after cleanup (row ${change.row})`;
+    const expectedAfter = snapshot.unit.expectedAfter || snapshot.unit.before.map((cell, row) => {
+      const changed = snapshot.unit!.changes.find((change) => change.row === row + 1);
+      return changed ? changed.afterValue : primitive(cell);
+    });
+    for (let row = 0; row < expectedAfter.length; row++) {
+      if (primitive(current.cells[row]?.[index] || {}) !== expectedAfter[row]) {
+        return `a unit cell changed after cleanup (row ${row + 1})`;
       }
     }
     for (let row = 0; row < Math.min(snapshot.rowCount, current.rowCount); row++) {

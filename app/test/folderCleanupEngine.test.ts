@@ -3,6 +3,7 @@ import assert from 'node:assert';
 import {
   BOOLEAN_COLUMNS,
   RETIRED_SALES_COLUMNS,
+  cleanupInputFingerprint,
   planFolderCleanup,
   type CleanupCell,
   type CleanupSheet,
@@ -90,6 +91,28 @@ test('blocks formula, date-coerced, numeric, and ambiguous master unit authority
   assert.ok(plan.sheets.flatMap((item) => item.blocks).some((block) => /ambiguous/.test(block.message)));
   assert.ok(plan.sheets.flatMap((item) => item.blocks).some((block) => /date\/time/.test(block.message)));
   assert.ok(plan.sheets.flatMap((item) => item.blocks).some((block) => /formula/i.test(block.message)));
+});
+
+test('materializes a numeric master unit as its displayed text before applying TEXT format', () => {
+  const master = sheet('master', baseHeaders, [
+    ['a1', '10', 'Oak', 2, '10', 'Oak', false, false, false, false, false, false, false],
+  ]);
+  master.cells[1][3].formattedValue = '02';
+  master.cells[1][3].numberFormat = { type: 'NUMBER', pattern: '00' };
+
+  const plan = planFolderCleanup(master, []);
+
+  assert.strictEqual(plan.sheets[0].unitChanges[0].afterValue, '02');
+});
+
+test('cleanup fingerprint detects eligibility changes in unrelated columns', () => {
+  const value = sheet('master', [...baseHeaders, 'Unrelated'], [
+    ['', '', '', '', '', '', '', '', '', '', '', '', '', ''],
+  ]);
+  const before = cleanupInputFingerprint(value);
+  value.cells[1][baseHeaders.length].userEnteredValue = 'now populated';
+
+  assert.notStrictEqual(cleanupInputFingerprint(value), before);
 });
 
 test('boolean formulas and unknown text block while BOOLEAN validation is removed only from approved fields', () => {

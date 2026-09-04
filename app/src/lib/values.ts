@@ -59,8 +59,26 @@ function normalizeBoolean(value: CellValue): string {
 }
 
 function normalizeNumericText(text: string): string {
-  if (!/^-?\d+(\.\d+)?$/.test(String(text || '').trim())) return '';
-  return 'number:' + String(Number(text));
+  let value = String(text || '').trim();
+  const match = value.match(/^(-?)(\d+)(?:\.(\d+))?(?:[eE]([+-]?\d+))?$/);
+  if (!match) return '';
+  const exponent = Number(match[4] || 0);
+  if (!Number.isInteger(exponent) || Math.abs(exponent) > 1000) return '';
+  const digits = match[2] + (match[3] || '');
+  const decimalPosition = match[2].length + exponent;
+  const unsigned = decimalPosition <= 0
+    ? `0.${'0'.repeat(-decimalPosition)}${digits}`
+    : decimalPosition >= digits.length
+      ? `${digits}${'0'.repeat(decimalPosition - digits.length)}`
+      : `${digits.slice(0, decimalPosition)}.${digits.slice(decimalPosition)}`;
+  value = `${match[1]}${unsigned}`;
+  const negative = value.startsWith('-');
+  const magnitude = negative ? value.slice(1) : value;
+  const [rawInteger, rawFraction = ''] = magnitude.split('.');
+  const integer = rawInteger.replace(/^0+(?=\d)/, '');
+  const fraction = rawFraction.replace(/0+$/, '');
+  const isZero = integer === '0' && fraction === '';
+  return `number:${negative && !isZero ? '-' : ''}${integer}${fraction ? `.${fraction}` : ''}`;
 }
 
 function normalizeDate(value: CellValue): string {
@@ -86,7 +104,12 @@ export function normalizeForCompare(value: CellValue, meta?: FieldCompareMeta): 
     return normalizeDate(value) || `invalid-date:${typeof value}:${String(value).trim()}`;
   }
   if (typed === 'number') {
-    if (typeof value === 'number' && isFinite(value)) return 'number:' + String(value);
+    if (typeof value === 'number' && isFinite(value)) {
+      if (Number.isInteger(value) && !Number.isSafeInteger(value)) {
+        return `unsafe-number:${String(value)}`;
+      }
+      return normalizeNumericText(String(value));
+    }
     if (typeof value === 'string') {
       return normalizeNumericText(value) || `invalid-number:${value.trim()}`;
     }

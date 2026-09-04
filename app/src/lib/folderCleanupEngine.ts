@@ -235,6 +235,15 @@ function planSheet(
         if (role === 'master') {
           const issue = unsafeUnit(before);
           if (issue) blocks.push({ code: 'unsafe_master_unit', message: issue, row: r + 1, column: '_SitusUnit' });
+          else if (typeof currentPrimitive(before) === 'number') {
+            unitChanges.push({
+              row: r + 1,
+              column: '_SitusUnit',
+              colIndex: unitIndex,
+              before,
+              afterValue: unitText(before),
+            });
+          }
         } else if (masterUnit.value === '' && unitText(before) !== '') {
           blocks.push({
             code: 'blank_unit_authority',
@@ -427,10 +436,15 @@ function relevantSheetFingerprint(sheet: CleanupSheet, headers: string[]): strin
     columnCount: sheet.columnCount,
     headers,
     dependencies: sheet.dependencies || [],
+    eligibleRows: sheet.cells.map((row) => eligibleRow(row)),
     cells: sheet.cells.map((row) =>
       indexes.map(({ header, index }) => [header, row?.[index] || {}])
     ),
   });
+}
+
+export function cleanupInputFingerprint(sheet: CleanupSheet): string {
+  return relevantSheetFingerprint(sheet, headersFor(sheet));
 }
 
 function hash(value: unknown): string {
