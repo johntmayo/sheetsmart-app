@@ -139,6 +139,34 @@ test('planPullToMaster: missing identity column is a hard error', () => {
   assert.ok(plan.errors[0].includes('resident_id'));
 });
 
+test('planPullToMaster: captain sales columns can never fill or overwrite master sales data', () => {
+  const salesFields = [
+    'Address - For Sale',
+    'Address - Sold Since Fire',
+    'Latest Sale Date',
+    'Latest Sale Price',
+    'Latest New Owner',
+    'Lot SqFt',
+    'Sales History',
+  ];
+  const master: Grid = [
+    ['resident_id', 'Phone', ...salesFields],
+    ['R1', '', '', 'master sold', '', '100', '', '', 'master history'],
+  ];
+  const captain: Grid = [
+    ['resident_id', 'Phone', ...salesFields],
+    ['R1', '555-0001', 'yes', 'captain sold', '2026-01-01', '200', 'Buyer', '5000', 'captain history'],
+  ];
+  const policies = Object.fromEntries(['Phone', ...salesFields].map((field) => [field, 'overwrite']));
+
+  const plan = planPullToMaster(master, captain, { policies });
+
+  assert.deepStrictEqual(plan.columnsCompared, ['Phone']);
+  assert.deepStrictEqual(plan.fills.map((change) => change.column), ['Phone']);
+  assert.strictEqual(plan.overwrites.length, 0);
+  assert.strictEqual(plan.conflicts.length, 0);
+});
+
 // ---- Captain-created residents ----
 
 // Two people share APN 100 on the master, which is normal: several residents
@@ -169,6 +197,21 @@ test('planPullNewResidents: proposes a genuinely new person and maps to master h
   // Ordered to the master's headers, and the captain-only column is dropped.
   assert.deepStrictEqual(candidate.row, ['C9', 'Alan Turing', '300', '30', 'Pine St', 'alan@example.com']);
   assert.deepStrictEqual(plan.columnsOnlyOnCaptain, ['Captain Notes']);
+});
+
+test('planPullNewResidents: blanks legacy captain sales values in new master rows', () => {
+  const master: Grid = [
+    ['resident_id', 'Resident Name', 'APN', 'Latest Sale Price', 'Sales History'],
+  ];
+  const captain: Grid = [
+    ['resident_id', 'Resident Name', 'APN', 'Latest Sale Price', 'Sales History'],
+    ['C9', 'New Person', '300', '999999', 'captain-maintained history'],
+  ];
+
+  const plan = planPullNewResidents(master, captain);
+
+  assert.deepStrictEqual(plan.candidates[0].row, ['C9', 'New Person', '300', '', '']);
+  assert.strictEqual(plan.candidates[0].filledColumns, 3);
 });
 
 test('planPullNewResidents: a shared APN alone is never a duplicate signal', () => {
@@ -371,4 +414,19 @@ test('planPullNewResidentsFromFolder: permits address-only placeholder rows when
   assert.strictEqual(plan.blocked.length, 0);
   assert.strictEqual(plan.addresses.length, 1);
   assert.strictEqual(plan.addresses[0].residents[0].residentName, '');
+});
+
+test('planPullNewResidentsFromFolder: cannot carry sales values from captain sheets', () => {
+  const master: Grid = [
+    ['address_id', 'resident_id', 'Resident Name', 'Latest New Owner', 'Sales History'],
+  ];
+  const captain: Grid = [
+    ['address_id', 'resident_id', 'Resident Name', 'Latest New Owner', 'Sales History'],
+    ['A2', 'C1', 'New Person', 'Legacy owner', 'Legacy sale'],
+  ];
+  const plan = planPullNewResidentsFromFolder(master, [
+    { spreadsheetId: 'S1', spreadsheetName: 'Zone 1', tabName: 'Sheet1', zone: 'Zone 1', grid: captain },
+  ]);
+
+  assert.deepStrictEqual(plan.addresses[0].residents[0].row, ['A2', 'C1', 'New Person', '', '']);
 });

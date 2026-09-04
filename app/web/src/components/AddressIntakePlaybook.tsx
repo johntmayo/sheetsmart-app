@@ -140,7 +140,7 @@ export function AddressIntakePlaybook() {
       </p>
       <div className="btn-row">
         <select className="select" value={sourceId} onChange={(event) => setSourceId(event.target.value)}>
-          <option value="">Choose an external address source</option>
+          <option value="">Choose an outside address list</option>
           {sources.map((source) => (
             <option key={source.id} value={source.id}>
               {source.name}
@@ -152,7 +152,7 @@ export function AddressIntakePlaybook() {
         </button>
       </div>
       {sources.length === 0 && (
-        <p className="reading-copy">Add the missing-address spreadsheet as an External source under Sources first.</p>
+        <p className="reading-copy">Add the missing-address spreadsheet as an optional outside list under Sources first.</p>
       )}
       {error && <ErrorState message={error} />}
 

@@ -14,6 +14,7 @@
 
 import { createHash } from 'node:crypto';
 import { trimHeaders, type Grid } from './mergeEngine';
+import { isZoneDashboardSalesField } from './salesFieldPolicy';
 import { decideWrite, normalizePolicy, type Policy } from './writeGuard';
 import type { CellValue } from './values';
 
@@ -133,6 +134,7 @@ export function planPullToMaster(
   for (let captainCol = 0; captainCol < captainHeaders.length; captainCol++) {
     const column = captainHeaders[captainCol];
     if (!column || column === identityColumn) continue;
+    if (isZoneDashboardSalesField(column)) continue;
     if (restrict && !restrict.has(column)) continue;
     const masterCol = masterHeaders.indexOf(column);
     if (masterCol === -1) continue;
@@ -668,7 +670,9 @@ function remapToMasterHeaders(
   captainHeaders.forEach((header, index) => {
     if (header && !byHeader.has(header)) byHeader.set(header, cells[index]);
   });
-  return masterHeaders.map((header) => (header ? (byHeader.get(header) ?? '') : ''));
+  return masterHeaders.map((header) =>
+    header && !isZoneDashboardSalesField(header) ? (byHeader.get(header) ?? '') : ''
+  );
 }
 
 function columnReader(headers: string[], ...candidates: string[]): (cells: CellValue[]) => CellValue {

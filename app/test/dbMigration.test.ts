@@ -38,16 +38,16 @@ test('existing dictionaries migrate safely and mark sales fields master-only', a
   legacy.close();
 
   process.env.DATABASE_PATH = databasePath;
-  const db = await import('../src/db');
+  const db = await import('../src/db.js');
   const connection = db.init();
   const migrated = connection
-    .prepare('SELECT canonical_name, distribute_to_captain FROM dictionary_fields ORDER BY sort_order')
-    .all() as Array<{ canonical_name: string; distribute_to_captain: number }>;
+    .prepare('SELECT canonical_name, distribute_to_captain, default_policy, notes FROM dictionary_fields ORDER BY sort_order')
+    .all() as Array<{ canonical_name: string; distribute_to_captain: number; default_policy: string; notes: string }>;
 
-  assert.deepStrictEqual(
-    migrated.filter((field) => salesFields.includes(field.canonical_name)).map((field) => field.distribute_to_captain),
-    salesFields.map(() => 0)
-  );
+  const migratedSales = migrated.filter((field) => salesFields.includes(field.canonical_name));
+  assert.deepStrictEqual(migratedSales.map((field) => field.distribute_to_captain), salesFields.map(() => 0));
+  assert.deepStrictEqual(migratedSales.map((field) => field.default_policy), salesFields.map(() => 'never'));
+  assert.ok(migratedSales.every((field) => /Zone Dashboard central sales data/.test(field.notes)));
   assert.strictEqual(
     migrated.find((field) => field.canonical_name === 'Resident Name')?.distribute_to_captain,
     1

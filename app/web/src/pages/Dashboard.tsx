@@ -122,9 +122,9 @@ export function Dashboard() {
           conn.captain_folder.length ? conn.captain_folder[0].name : 'Not added yet',
         )}
         {connCard(
-          'External sources',
+          'Outside address lists (optional)',
           conn.external.length > 0,
-          conn.external.length ? `${conn.external.length} connected` : 'Not added yet',
+          conn.external.length ? `${conn.external.length} connected for address intake` : 'Not needed for normal operation',
         )}
       </div>
 

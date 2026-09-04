@@ -8,7 +8,7 @@ import { useToast } from '../components/Toast';
 const TYPE_LABEL: Record<ConnectionType, string> = {
   master: 'Master',
   captain_folder: 'Captain folder',
-  external: 'External',
+  external: 'Outside list / address intake',
 };
 
 export function Sources() {
@@ -57,7 +57,7 @@ export function Sources() {
       {rows.length === 0 ? (
         <EmptyState
           title="No sources yet"
-          body="Add your master spreadsheet, the captain sheets folder, and any external sources."
+          body="Add your master spreadsheet and captain sheets folder. Outside lists are optional and only needed for address intake."
         />
       ) : (
         <div className="table-wrap">
@@ -163,7 +163,7 @@ function SourceForm({
           <select className="select" value={form.type} onChange={set('type')}>
             <option value="master">Master spreadsheet</option>
             <option value="captain_folder">Captain sheets folder</option>
-            <option value="external">External source spreadsheet</option>
+            <option value="external">Outside list / address-intake spreadsheet (optional)</option>
           </select>
         </div>
         <div className="field">

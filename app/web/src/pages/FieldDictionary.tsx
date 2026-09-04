@@ -7,6 +7,19 @@ import { useToast } from '../components/Toast';
 
 const TYPES: FieldDataType[] = ['text', 'number', 'date', 'checkbox'];
 const POLICIES: Policy[] = ['fill_blank', 'overwrite', 'conflict', 'never'];
+const SALES_FIELDS = new Set([
+  'address - for sale',
+  'address - sold since fire',
+  'latest sale date',
+  'latest sale price',
+  'latest new owner',
+  'lot sqft',
+  'sales history',
+]);
+
+function isSalesField(name: string): boolean {
+  return SALES_FIELDS.has(name.trim().toLowerCase());
+}
 const POLICY_LABEL: Record<Policy, string> = {
   fill_blank: 'Fill if blank',
   overwrite: 'Replace existing',
@@ -49,6 +62,10 @@ export function FieldDictionary() {
   );
 
   async function del(f: DictionaryField) {
+    if (isSalesField(f.canonical_name)) {
+      toast('Zone Dashboard-owned sales fields must remain on the master.', 'error');
+      return;
+    }
     if (f.is_identity) {
       toast('The identity field cannot be deleted.', 'error');
       return;
@@ -214,6 +231,7 @@ function FieldForm({
     aliasesText: (existing?.aliases ?? []).join(', '),
   });
   const [busy, setBusy] = useState(false);
+  const salesOwned = isSalesField(existing?.canonical_name || form.canonical_name);
 
   async function submit(e: FormEvent) {
     e.preventDefault();
@@ -221,11 +239,11 @@ function FieldForm({
     const payload = {
       canonical_name: form.canonical_name.trim(),
       data_type: form.data_type,
-      default_policy: form.is_identity ? 'never' : form.default_policy,
+      default_policy: form.is_identity || salesOwned ? 'never' : form.default_policy,
       is_identity: form.is_identity,
       is_sensitive: form.is_sensitive,
       is_text_safe: form.is_text_safe,
-      distribute_to_captain: form.distribute_to_captain,
+      distribute_to_captain: salesOwned ? false : form.distribute_to_captain,
       notes: form.notes,
       aliases: form.aliasesText
         .split(',')
@@ -256,6 +274,7 @@ function FieldForm({
               className="input mono"
               value={form.canonical_name}
               onChange={(e) => setForm((f) => ({ ...f, canonical_name: e.target.value }))}
+              disabled={Boolean(existing && salesOwned)}
               required
             />
           </div>
@@ -279,8 +298,8 @@ function FieldForm({
           <label>Default sync policy</label>
           <select
             className="select"
-            value={form.is_identity ? 'never' : form.default_policy}
-            disabled={form.is_identity}
+            value={form.is_identity || salesOwned ? 'never' : form.default_policy}
+            disabled={form.is_identity || salesOwned}
             onChange={(e) => setForm((f) => ({ ...f, default_policy: e.target.value as Policy }))}
           >
             {POLICIES.map((p) => (
@@ -292,6 +311,9 @@ function FieldForm({
           {form.is_identity && (
             <div className="hint">Unique ID fields are never overwritten by automated updates.</div>
           )}
+          {salesOwned && (
+            <div className="hint">Zone Dashboard owns this sales field. SheetSmart never writes it from another source.</div>
+          )}
         </div>
 
         <div className="field">
@@ -299,8 +321,9 @@ function FieldForm({
           <label className="chip" style={{ cursor: 'pointer' }}>
             <input
               type="checkbox"
-              checked={form.distribute_to_captain}
+              checked={salesOwned ? false : form.distribute_to_captain}
               onChange={toggle('distribute_to_captain')}
+              disabled={salesOwned}
             />{' '}
             Include this field on captain sheets
           </label>
@@ -346,6 +369,7 @@ function FieldForm({
             className="input"
             value={form.notes}
             onChange={(e) => setForm((f) => ({ ...f, notes: e.target.value }))}
+            disabled={salesOwned}
           />
         </div>
 

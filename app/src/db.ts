@@ -7,6 +7,7 @@ import path from 'path';
 import Database from 'better-sqlite3';
 import { config } from './config';
 import { buildSeed } from './dictionarySeed';
+import { ZONE_DASHBOARD_SALES_FIELDS, ZONE_DASHBOARD_SALES_NOTE } from './lib/salesFieldPolicy';
 
 // The dictionary field data types, shared with the seed + routes.
 export type DataType = 'text' | 'number' | 'date' | 'checkbox';
@@ -296,7 +297,7 @@ export function init(): Database.Database {
 
   seedDictionaryIfEmpty();
   ensureDeletionMarkerField();
-  applyCaptainDistributionScopeV1();
+  applySalesOwnershipLock();
   applyPrivacyClassificationV1();
   redactHistoricalSensitiveLogsV1();
   return db;
@@ -387,32 +388,17 @@ function seedDictionaryIfEmpty(): void {
   tx();
 }
 
-// Sales enrichment belongs on the master only. This versioned migration is
-// additive and idempotent, so existing databases retain every other field
-// setting while these known sales columns stop flowing to captain sheets.
-function applyCaptainDistributionScopeV1(): void {
+// Zone Dashboard owns sales. Reapply this invariant at every startup so an
+// older UI, direct database edit, or stale deployment cannot loosen it.
+function applySalesOwnershipLock(): void {
   const conn = getDb();
-  const key = 'captain_distribution_scope_v1';
-  if (conn.prepare('SELECT value FROM app_settings WHERE key=?').get(key)) return;
-  const masterOnlyFields = [
-    'Address - For Sale',
-    'Address - Sold Since Fire',
-    'Latest Sale Date',
-    'Latest Sale Price',
-    'Latest New Owner',
-    'Lot SqFt',
-    'Sales History',
-  ];
-  const tx = conn.transaction(() => {
-    conn
-      .prepare(
-        `UPDATE dictionary_fields SET distribute_to_captain=0
-         WHERE canonical_name IN (${masterOnlyFields.map(() => '?').join(',')})`
-      )
-      .run(...masterOnlyFields);
-    conn.prepare('INSERT INTO app_settings (key, value) VALUES (?, ?)').run(key, new Date().toISOString());
-  });
-  tx();
+  conn
+    .prepare(
+      `UPDATE dictionary_fields
+          SET distribute_to_captain=0, default_policy='never', notes=?
+        WHERE canonical_name IN (${ZONE_DASHBOARD_SALES_FIELDS.map(() => '?').join(',')})`
+    )
+    .run(ZONE_DASHBOARD_SALES_NOTE, ...ZONE_DASHBOARD_SALES_FIELDS);
 }
 
 // One-time classification of resident PII, casework notes, and sensitive

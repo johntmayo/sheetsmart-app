@@ -32,15 +32,9 @@ interface DictFieldRow {
 // a tested pure planner in mergeEngine (SHEETSMART_VISION_AND_ROADMAP.md §5.2).
 export const PREVIEW_PLAYBOOKS = [
   {
-    key: 'import_sales',
-    title: 'Pull in the newest sales data',
-    engine: 'import → master (cell-fill, matched by APN)',
-    kind: 'cell_fill',
-  },
-  {
     key: 'push_master',
-    title: 'Push the latest master data to captains',
-    engine: 'push → folder (cell-fill, matched by resident_id)',
+    title: 'Push resident and non-sales fields to captains',
+    engine: 'master → folder (resident/non-sales cell-fill, matched by resident_id)',
     kind: 'cell_fill',
   },
   {
@@ -86,12 +80,8 @@ export default function registerPreviewRoutes(api: Router, { db }: Deps): void {
 
     const master = db.get<ConnectionRow>("SELECT * FROM connections WHERE type = 'master' ORDER BY id LIMIT 1");
     const folder = db.get<ConnectionRow>("SELECT * FROM connections WHERE type = 'captain_folder' ORDER BY id LIMIT 1");
-    const external = db.get<ConnectionRow>("SELECT * FROM connections WHERE type = 'external' ORDER BY id LIMIT 1");
 
     if (!master) return res.status(400).json({ error: 'No master connection is configured (Sources).' });
-    if (playbook === 'import_sales' && !external) {
-      return res.status(400).json({ error: 'No external source (sales tracker) is configured (Sources).' });
-    }
     if ((playbook === 'push_master' || playbook === 'add_missing_residents') && !folder) {
       return res.status(400).json({ error: 'No captain folder is configured (Sources).' });
     }
@@ -109,9 +99,7 @@ export default function registerPreviewRoutes(api: Router, { db }: Deps): void {
       const masterGrid = await readSheetGrid(master.google_id, master.source_tab || undefined);
       let payload: unknown;
 
-      if (playbook === 'import_sales') {
-        payload = await previewImportSales(external!, masterGrid, dict);
-      } else if (playbook === 'push_master') {
+      if (playbook === 'push_master') {
         payload = await previewPushMaster(folder!, masterGrid, dict);
       } else {
         payload = await previewAddMissing(
@@ -156,38 +144,6 @@ function sensitiveNames(dict: DictField[]): string[] {
 }
 
 // ---- Playbook implementations ----
-
-async function previewImportSales(external: ConnectionRow, masterGrid: Grid, dict: DictField[]) {
-  const salesGrid = await readSheetGrid(external.google_id, external.source_tab || undefined);
-  const cfg = buildCellFillConfig(trimHeaders(salesGrid[0]), trimHeaders(masterGrid[0]), 'APN', dict);
-  if (!cfg.matchSourceHeader) throw new Error('The sales tracker has no APN column to match on.');
-  if (!cfg.matchTargetHeader) throw new Error('The master has no APN column to match on.');
-
-  const { lookup } = buildSourceLookup(salesGrid, cfg.matchSourceHeader);
-  const plan = planCellFill(masterGrid, lookup, cfg.matchTargetHeader, cfg.columnMap, {
-    policies: cfg.policies,
-    protectedColumns: cfg.protectedColumns,
-    defaultPolicy: 'fill_blank',
-  });
-
-  const impact = summarizeCellFill([plan]);
-  return {
-    impact,
-    unmatchedFields: cfg.unmatchedFields,
-    target: 'master',
-    sheets: [
-      {
-        name: 'Master Data File',
-        url: '',
-        filled: plan.filled.length,
-        conflicts: plan.conflicts.length,
-        overwritten: plan.overwritten.length,
-        columnsToAdd: plan.columnsToAdd.length,
-        errors: plan.errors.map((e) => e.message),
-      },
-    ],
-  };
-}
 
 async function previewPushMaster(folder: ConnectionRow, masterGrid: Grid, dict: DictField[]) {
   const files = await google.listSpreadsheetsInFolder(folder.google_id);

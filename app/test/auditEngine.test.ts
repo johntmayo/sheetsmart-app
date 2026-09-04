@@ -205,15 +205,23 @@ test('runAudit does not count intentionally master-only sales columns as drift',
 });
 
 test('runAudit reports master-only fields that remain on captain sheets as extra', () => {
-  const captain = [
-    [...MASTER[0]],
-    [...MASTER[1]],
+  const salesFields = [
+    'Address - For Sale',
+    'Address - Sold Since Fire',
+    'Latest Sale Date',
+    'Latest Sale Price',
+    'Latest New Owner',
+    'Lot SqFt',
+    'Sales History',
   ];
-  const report = runAudit(MASTER, [{ name: 'Zone A Captain', data: captain }], {
-    captainDistributedHeaders: MASTER[0]
-      .map(String)
-      .filter((header) => header !== 'Address - For Sale'),
+  const master = [
+    ['resident_id', 'ZoneName', 'Resident Name', ...salesFields],
+    ['R1', 'Zone A', 'Ann', true, true, '2026-01-01', 100, 'Owner', 5000, 'History'],
+  ];
+  const captain = master.map((row) => [...row]);
+  const report = runAudit(master, [{ name: 'Zone A Captain', data: captain }], {
+    captainDistributedHeaders: ['resident_id', 'ZoneName', 'Resident Name'],
   });
   assert.strictEqual(report.sheets[0].status, 'Extra Columns');
-  assert.ok(report.sheets[0].extraColumns.includes('Address - For Sale'));
+  assert.deepStrictEqual(report.sheets[0].extraColumns, salesFields);
 });

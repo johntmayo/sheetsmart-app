@@ -28,8 +28,7 @@ const UPCOMING = [
 ];
 
 function previewDescription(key: string): string {
-  if (key === 'import_sales') return 'Matches properties by parcel number (APN) and shows what the master would receive.';
-  if (key === 'push_master') return 'Shows which existing captain-sheet cells would be filled from the master.';
+  if (key === 'push_master') return 'Shows which resident and non-sales cells would be filled from the master. Zone Dashboard-owned sales fields are excluded.';
   return 'Shows which master residents are missing from their captain zone sheet.';
 }
 
@@ -150,7 +149,7 @@ export function Workflows() {
       {playbooks.length === 0 && (
         <EmptyState
           title="No previewable playbooks yet"
-          body="Add your master sheet, captain folder, and sales tracker under Sources, then return here."
+          body="Add your master sheet and captain folder under Sources, then return here."
         />
       )}
 

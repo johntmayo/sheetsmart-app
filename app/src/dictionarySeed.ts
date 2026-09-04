@@ -3,13 +3,13 @@
 // SHEETSMART_VISION_AND_ROADMAP.md Appendix A) plus the identity/type/text-safe
 // facts the legacy tool relies on (handoff 1.5 / legacy Code.gs).
 //
-// This is a *seed*, not a lock: every field here is editable by the Operator in
-// the UI. Corrections (e.g. a new alias for a drifted header) are meant to be
-// added over time so the tool learns the drift instead of guessing silently.
+// Most settings are editable by the Operator. The seven Zone Dashboard-owned
+// sales fields are the exception: their distribution, write policy, and
+// ownership note are enforced by the API and startup migration.
 //
 // Defaults reasoning:
 // - default_policy 'fill_blank' everywhere (fill blanks only), except the
-//   identity key resident_id which is always 'never' (it is sacred; handoff 5).
+//   identity key and Zone Dashboard-owned sales fields, which are 'never'.
 // - Checkboxes: only the two the source doc explicitly calls checkboxes are
 //   seeded as such (they count with `=== true`, not non-blank). Others are left
 //   as text for the Operator to confirm rather than guessed at.
@@ -19,6 +19,11 @@
 //   push to a captain sheet flags them for confirmation. Informational only.
 
 import type { DataType } from './db';
+import {
+  isZoneDashboardSalesField,
+  ZONE_DASHBOARD_SALES_FIELDS,
+  ZONE_DASHBOARD_SALES_NOTE,
+} from './lib/salesFieldPolicy';
 import type { Policy } from './lib/writeGuard';
 
 // A single seed row: the field's dictionary attributes plus its known aliases.
@@ -38,15 +43,7 @@ export interface SeedField {
 const IDENTITY = new Set(['resident_id']);
 const CHECKBOX = new Set(['Address - For Sale', 'Address - Sold Since Fire']);
 const TEXT_SAFE = new Set(['APN', 'resident_id', 'address_id', 'Zip', '_SitusUnit']);
-const MASTER_ONLY = new Set([
-  'Address - For Sale',
-  'Address - Sold Since Fire',
-  'Latest Sale Date',
-  'Latest Sale Price',
-  'Latest New Owner',
-  'Lot SqFt',
-  'Sales History',
-]);
+const MASTER_ONLY = new Set<string>(ZONE_DASHBOARD_SALES_FIELDS);
 const SENSITIVE = new Set([
   'Age',
   'Gender',
@@ -124,8 +121,12 @@ export function buildSeed(): SeedField[] {
     is_sensitive: SENSITIVE.has(name) ? 1 : 0,
     is_text_safe: TEXT_SAFE.has(name) ? 1 : 0,
     distribute_to_captain: MASTER_ONLY.has(name) ? 0 : 1,
-    default_policy: (IDENTITY.has(name) ? 'never' : 'fill_blank') as Policy,
-    notes: name === 'ZoneName' ? 'Zone is inferred as the mode of this column per captain sheet.' : '',
+    default_policy: (IDENTITY.has(name) || isZoneDashboardSalesField(name) ? 'never' : 'fill_blank') as Policy,
+    notes: isZoneDashboardSalesField(name)
+      ? ZONE_DASHBOARD_SALES_NOTE
+      : name === 'ZoneName'
+        ? 'Zone is inferred as the mode of this column per captain sheet.'
+        : '',
     sort_order: i,
     aliases: EXTRA_ALIASES[name] || [],
   }));

@@ -40,6 +40,7 @@ import {
   type PullCellKey,
 } from './lib/pullEngine';
 import { cellValuesEqual } from './lib/values';
+import { isZoneDashboardSalesField } from './lib/salesFieldPolicy';
 import { fetchZoneFeatures, isMapboxConfigured, DEFAULT_MAPBOX_USERNAME, DEFAULT_MAPBOX_DATASET_ID } from './mapbox';
 import {
   canonicalizeHeaders,
@@ -591,6 +592,17 @@ async function applyConflictCopy(ctx: JobContext): Promise<unknown> {
     for (const conflict of group.rows) {
       const conflictContext = parseConflictContext(conflict.context_json);
       const column = conflictContext?.column || conflict.column;
+      if (isZoneDashboardSalesField(column)) {
+        skipped++;
+        ctx.log({
+          spreadsheet: context.spreadsheetName,
+          resident_id: conflict.resident_id,
+          column,
+          type: 'skip',
+          message: 'Zone Dashboard owns this sales field; captain values can never be applied to it.',
+        });
+        continue;
+      }
       const colIndex = headers.indexOf(column);
       const rowIndex = findRowByResidentId(grid, headers, conflict.resident_id);
       const current = colIndex === -1 || rowIndex === -1 ? undefined : grid[rowIndex]?.[colIndex];

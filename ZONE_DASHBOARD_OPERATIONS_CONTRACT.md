@@ -3,6 +3,18 @@
 SheetSmart exposes the live contract at `GET /api/operations/contract`. The
 current schema version is `1.0`.
 
+## Sales-data ownership
+
+Zone Dashboard is the central source for sales data. SheetSmart retains the
+existing master columns `Address - For Sale`, `Address - Sold Since Fire`,
+`Latest Sale Date`, `Latest Sale Price`, `Latest New Owner`, `Lot SqFt`, and
+`Sales History` so historical data remains readable, but never imports those
+values from captain sheets or distributes them to captains. Their SheetSmart
+policy is permanently **Never write** and **Master only**.
+
+Outside spreadsheet connections are optional inputs for address intake. They
+are not sales feeds.
+
 ## Exact tab schemas
 
 `Deleted Records` must use this exact order:
