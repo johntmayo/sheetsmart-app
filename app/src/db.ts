@@ -85,7 +85,8 @@ CREATE TABLE IF NOT EXISTS run_log_entries (
   type           TEXT NOT NULL,
   existing_value TEXT DEFAULT '',
   incoming_value TEXT DEFAULT '',
-  message        TEXT DEFAULT ''
+  message        TEXT DEFAULT '',
+  value_redacted INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_log_run ON run_log_entries(run_id);
 CREATE INDEX IF NOT EXISTS idx_log_type ON run_log_entries(run_id, type);
@@ -112,6 +113,20 @@ CREATE INDEX IF NOT EXISTS idx_snapshot_run ON run_snapshots(run_id);
 CREATE INDEX IF NOT EXISTS idx_snapshot_identity
   ON run_snapshots(spreadsheet_id, tab_name, resident_id);
 
+-- Files created by SheetSmart (currently missing captain-zone sheets). Their
+-- post-create modified time lets Undo preserve any file humans edited later.
+CREATE TABLE IF NOT EXISTS run_created_files (
+  id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id             INTEGER NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+  file_id            TEXT NOT NULL,
+  file_name          TEXT NOT NULL DEFAULT '',
+  web_view_link      TEXT NOT NULL DEFAULT '',
+  modified_time      TEXT NOT NULL DEFAULT '',
+  reverted_by_run_id INTEGER REFERENCES runs(id) ON DELETE SET NULL,
+  created_at         TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_created_file_run ON run_created_files(run_id);
+
 CREATE TABLE IF NOT EXISTS conflicts (
   id               INTEGER PRIMARY KEY AUTOINCREMENT,
   run_id           INTEGER NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
@@ -126,16 +141,111 @@ CREATE TABLE IF NOT EXISTS conflicts (
   created_at       TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- Cross-app resident/address lifecycle. Full deleted row payloads remain in a
+-- private Google workbook; SQLite keeps identities, status, and source indexes
+-- so normal reconciliation cannot resurrect deliberately deleted records.
+CREATE TABLE IF NOT EXISTS deletion_operations (
+  operation_id       TEXT PRIMARY KEY,
+  action             TEXT NOT NULL CHECK (action IN ('delete_person','delete_address','restore')),
+  actor              TEXT NOT NULL DEFAULT '',
+  zone               TEXT NOT NULL DEFAULT '',
+  address_id         TEXT NOT NULL DEFAULT '',
+  requested_at       TEXT NOT NULL,
+  status             TEXT NOT NULL DEFAULT 'pending'
+                     CHECK (status IN ('pending','queued','applied','restored','failed')),
+  applied_run_id     INTEGER REFERENCES runs(id) ON DELETE SET NULL,
+  error              TEXT NOT NULL DEFAULT '',
+  created_at         TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at         TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS deletion_archive_index (
+  id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+  operation_id       TEXT NOT NULL REFERENCES deletion_operations(operation_id) ON DELETE CASCADE,
+  resident_id        TEXT NOT NULL DEFAULT '',
+  address_id         TEXT NOT NULL DEFAULT '',
+  source_sheet_id    TEXT NOT NULL DEFAULT '',
+  source_sheet_tab   TEXT NOT NULL DEFAULT '',
+  archive_fingerprint TEXT NOT NULL DEFAULT '',
+  UNIQUE(operation_id, resident_id, address_id, source_sheet_id, source_sheet_tab)
+);
+CREATE INDEX IF NOT EXISTS idx_deletion_archive_operation ON deletion_archive_index(operation_id);
+
+CREATE TABLE IF NOT EXISTS deletion_attempt_runs (
+  operation_id       TEXT NOT NULL REFERENCES deletion_operations(operation_id) ON DELETE CASCADE,
+  run_id             INTEGER NOT NULL UNIQUE REFERENCES runs(id) ON DELETE CASCADE,
+  created_at         TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY(operation_id, run_id)
+);
+
+CREATE TABLE IF NOT EXISTS lifecycle_operation_locks (
+  run_id             INTEGER PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,
+  operation_id       TEXT NOT NULL,
+  created_at         TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS sheet_safety_locks (
+  spreadsheet_id     TEXT NOT NULL,
+  protected_range_id INTEGER NOT NULL,
+  operation_id       TEXT NOT NULL,
+  run_id             INTEGER NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+  created_at         TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY(spreadsheet_id, protected_range_id)
+);
+
+CREATE TABLE IF NOT EXISTS resident_tombstones (
+  resident_id        TEXT PRIMARY KEY,
+  address_id         TEXT NOT NULL DEFAULT '',
+  operation_id       TEXT NOT NULL REFERENCES deletion_operations(operation_id) ON DELETE RESTRICT,
+  active             INTEGER NOT NULL DEFAULT 1,
+  deleted_at         TEXT NOT NULL,
+  restored_at        TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_resident_tombstones_active ON resident_tombstones(active, address_id);
+
+CREATE TABLE IF NOT EXISTS address_tombstones (
+  address_id         TEXT PRIMARY KEY,
+  operation_id       TEXT NOT NULL REFERENCES deletion_operations(operation_id) ON DELETE RESTRICT,
+  active             INTEGER NOT NULL DEFAULT 1,
+  deleted_at         TEXT NOT NULL,
+  restored_at        TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_address_tombstones_active ON address_tombstones(active);
+
+CREATE TABLE IF NOT EXISTS activity_events (
+  event_id           TEXT PRIMARY KEY,
+  actor              TEXT NOT NULL,
+  zone               TEXT NOT NULL DEFAULT '',
+  event_type         TEXT NOT NULL,
+  resident_id        TEXT NOT NULL DEFAULT '',
+  address_id         TEXT NOT NULL DEFAULT '',
+  resident_name      TEXT NOT NULL DEFAULT '',
+  address_label      TEXT NOT NULL DEFAULT '',
+  quantity           INTEGER NOT NULL DEFAULT 1,
+  occurred_at        TEXT NOT NULL,
+  ingested_at        TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_activity_occurred ON activity_events(occurred_at DESC);
+
 CREATE TABLE IF NOT EXISTS jobs (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
   run_id        INTEGER REFERENCES runs(id) ON DELETE CASCADE,
   status        TEXT NOT NULL CHECK (status IN ('queued','running','succeeded','failed','cancelled','interrupted')),
   progress_json TEXT DEFAULT '{}',
   error         TEXT DEFAULT '',
+  owner_id      TEXT DEFAULT '',
+  heartbeat_at  TEXT,
   enqueued_at   TEXT NOT NULL DEFAULT (datetime('now')),
   started_at    TEXT,
   finished_at   TEXT
 );
+
+CREATE TABLE IF NOT EXISTS preview_claims (
+  preview_run_id INTEGER PRIMARY KEY REFERENCES runs(id) ON DELETE RESTRICT,
+  applied_run_id INTEGER NOT NULL UNIQUE REFERENCES runs(id) ON DELETE RESTRICT,
+  claimed_at     TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_jobs_queue ON jobs(status, enqueued_at, id);
 
 -- Simple key/value store for app-wide settings that are not workflow-scoped.
 CREATE TABLE IF NOT EXISTS app_settings (
@@ -153,6 +263,7 @@ CREATE TABLE IF NOT EXISTS dictionary_fields (
   is_identity    INTEGER NOT NULL DEFAULT 0,
   is_sensitive   INTEGER NOT NULL DEFAULT 0,
   is_text_safe   INTEGER NOT NULL DEFAULT 0,
+  distribute_to_captain INTEGER NOT NULL DEFAULT 1,
   default_policy TEXT NOT NULL DEFAULT 'fill_blank' CHECK (default_policy IN ('fill_blank','overwrite','conflict','never')),
   notes          TEXT DEFAULT '',
   sort_order     INTEGER NOT NULL DEFAULT 0,
@@ -178,12 +289,51 @@ export function init(): Database.Database {
   db = new Database(config.databasePath);
   db.pragma('journal_mode = WAL');
   db.pragma('foreign_keys = ON');
+  db.pragma('busy_timeout = 5000');
   db.exec(SCHEMA);
   applyColumnMigrations();
+  backfillPreviewClaims();
 
-  reconcileInterruptedJobsOnStartup();
   seedDictionaryIfEmpty();
+  ensureDeletionMarkerField();
+  applyCaptainDistributionScopeV1();
+  applyPrivacyClassificationV1();
+  redactHistoricalSensitiveLogsV1();
   return db;
+}
+
+function ensureDeletionMarkerField(): void {
+  const conn = getDb();
+  if (conn.prepare("SELECT id FROM dictionary_fields WHERE canonical_name='Deleted Record'").get()) return;
+  const field = buildSeed().find((item) => item.canonical_name === 'Deleted Record');
+  if (!field) throw new Error('Deleted Record dictionary seed is missing.');
+  const { aliases, ...row } = field;
+  const info = conn
+    .prepare(
+      `INSERT INTO dictionary_fields
+         (canonical_name, data_type, is_identity, is_sensitive, is_text_safe, distribute_to_captain,
+          default_policy, notes, sort_order)
+       VALUES (@canonical_name, @data_type, @is_identity, @is_sensitive, @is_text_safe, @distribute_to_captain,
+               @default_policy, @notes, @sort_order)`
+    )
+    .run(row);
+  for (const alias of aliases) {
+    conn.prepare('INSERT INTO dictionary_aliases (field_id, alias) VALUES (?, ?)').run(info.lastInsertRowid, alias);
+  }
+}
+
+function backfillPreviewClaims(): void {
+  getDb()
+    .prepare(
+      `INSERT OR IGNORE INTO preview_claims (preview_run_id, applied_run_id)
+       SELECT preview.id, CAST(json_extract(preview.summary_json, '$.appliedRunId') AS INTEGER)
+       FROM runs preview
+       JOIN runs applied
+         ON applied.id = CAST(json_extract(preview.summary_json, '$.appliedRunId') AS INTEGER)
+       WHERE json_valid(preview.summary_json)
+         AND json_type(preview.summary_json, '$.appliedRunId') = 'integer'`
+    )
+    .run();
 }
 
 // Additive column migrations for databases created by an earlier build. Each
@@ -194,6 +344,14 @@ function applyColumnMigrations(): void {
     // Where a conflict came from (spreadsheet, tab, row, column), so the
     // Conflict Inbox can write the approved value back to the exact cell.
     { table: 'conflicts', column: 'context_json', definition: "TEXT NOT NULL DEFAULT '{}'" },
+    { table: 'jobs', column: 'owner_id', definition: "TEXT NOT NULL DEFAULT ''" },
+    { table: 'jobs', column: 'heartbeat_at', definition: 'TEXT' },
+    { table: 'run_log_entries', column: 'value_redacted', definition: 'INTEGER NOT NULL DEFAULT 0' },
+    {
+      table: 'dictionary_fields',
+      column: 'distribute_to_captain',
+      definition: 'INTEGER NOT NULL DEFAULT 1',
+    },
   ];
 
   for (const migration of migrations) {
@@ -213,8 +371,10 @@ function seedDictionaryIfEmpty(): void {
   const seed = buildSeed();
   const insertField = conn.prepare(
     `INSERT INTO dictionary_fields
-       (canonical_name, data_type, is_identity, is_sensitive, is_text_safe, default_policy, notes, sort_order)
-     VALUES (@canonical_name, @data_type, @is_identity, @is_sensitive, @is_text_safe, @default_policy, @notes, @sort_order)`
+       (canonical_name, data_type, is_identity, is_sensitive, is_text_safe, distribute_to_captain,
+        default_policy, notes, sort_order)
+     VALUES (@canonical_name, @data_type, @is_identity, @is_sensitive, @is_text_safe, @distribute_to_captain,
+             @default_policy, @notes, @sort_order)`
   );
   const insertAlias = conn.prepare('INSERT INTO dictionary_aliases (field_id, alias) VALUES (?, ?)');
   const tx = conn.transaction(() => {
@@ -227,34 +387,112 @@ function seedDictionaryIfEmpty(): void {
   tx();
 }
 
+// Sales enrichment belongs on the master only. This versioned migration is
+// additive and idempotent, so existing databases retain every other field
+// setting while these known sales columns stop flowing to captain sheets.
+function applyCaptainDistributionScopeV1(): void {
+  const conn = getDb();
+  const key = 'captain_distribution_scope_v1';
+  if (conn.prepare('SELECT value FROM app_settings WHERE key=?').get(key)) return;
+  const masterOnlyFields = [
+    'Address - For Sale',
+    'Address - Sold Since Fire',
+    'Latest Sale Date',
+    'Latest Sale Price',
+    'Latest New Owner',
+    'Lot SqFt',
+    'Sales History',
+  ];
+  const tx = conn.transaction(() => {
+    conn
+      .prepare(
+        `UPDATE dictionary_fields SET distribute_to_captain=0
+         WHERE canonical_name IN (${masterOnlyFields.map(() => '?').join(',')})`
+      )
+      .run(...masterOnlyFields);
+    conn.prepare('INSERT INTO app_settings (key, value) VALUES (?, ?)').run(key, new Date().toISOString());
+  });
+  tx();
+}
+
+// One-time classification of resident PII, casework notes, and sensitive
+// outreach/status fields. Operators can refine these flags afterward in the
+// Field Dictionary without startup overwriting their choices.
+function applyPrivacyClassificationV1(): void {
+  const conn = getDb();
+  const key = 'privacy_classification_v1';
+  const alreadyApplied = conn.prepare('SELECT value FROM app_settings WHERE key=?').get(key);
+  if (alreadyApplied) return;
+  const fields = [
+    'Age',
+    'Gender',
+    'Home Phone',
+    'Cell',
+    'Email',
+    'Damage',
+    'Address Plan',
+    'Build Status',
+    'Person - Renter',
+    'Person - Needs Follow-Up',
+    'Person - Unable to Reach',
+    'Person Notes',
+    'Last Outreach Attempt Date',
+    'Outreach Log',
+    'Address Notes',
+    'Former Resident',
+    'Deceased',
+    'Wants_Updates',
+    'Remediation Status',
+    'Successfully Contacted',
+    'NC Phone',
+    'NC Email',
+  ];
+  const tx = conn.transaction(() => {
+    conn
+      .prepare(`UPDATE dictionary_fields SET is_sensitive=1 WHERE canonical_name IN (${fields.map(() => '?').join(',')})`)
+      .run(...fields);
+    conn.prepare('INSERT INTO app_settings (key, value) VALUES (?, ?)').run(key, new Date().toISOString());
+  });
+  tx();
+}
+
+function redactHistoricalSensitiveLogsV1(): void {
+  const conn = getDb();
+  const key = 'historical_log_redaction_v1';
+  if (conn.prepare('SELECT value FROM app_settings WHERE key=?').get(key)) return;
+  const sensitiveKeys = new Set<string>();
+  const fields = conn
+    .prepare('SELECT id, canonical_name FROM dictionary_fields WHERE is_sensitive=1')
+    .all() as Array<{ id: number; canonical_name: string }>;
+  const aliases = conn.prepare('SELECT alias FROM dictionary_aliases WHERE field_id=?');
+  const normalize = (value: unknown) => String(value ?? '').trim().toLowerCase().replace(/[^a-z0-9]/g, '');
+  for (const field of fields) {
+    sensitiveKeys.add(normalize(field.canonical_name));
+    for (const row of aliases.all(field.id) as Array<{ alias: string }>) sensitiveKeys.add(normalize(row.alias));
+  }
+  const rows = conn
+    .prepare('SELECT id, column, type FROM run_log_entries WHERE value_redacted=0')
+    .all() as Array<{ id: number; column: string; type: string }>;
+  const redact = conn.prepare(
+    `UPDATE run_log_entries
+     SET existing_value='[private field hidden]',
+         incoming_value='[private field hidden]',
+         message='Private field event recorded; values hidden.',
+         value_redacted=1
+     WHERE id=?`
+  );
+  const tx = conn.transaction(() => {
+    for (const row of rows) {
+      if (row.type === 'sensitive' || sensitiveKeys.has(normalize(row.column))) redact.run(row.id);
+    }
+    conn.prepare('INSERT INTO app_settings (key, value) VALUES (?, ?)').run(key, new Date().toISOString());
+  });
+  tx();
+}
+
 export function getDb(): Database.Database {
   if (!db) init();
   return db as Database.Database;
-}
-
-// Job durability (handoff 3.2): on startup, no job can still be legitimately
-// "running" because the process just started, so mark any such rows and their
-// runs as interrupted. This keeps the queue from being blocked by a zombie.
-function reconcileInterruptedJobsOnStartup(): void {
-  const conn = getDb();
-  const now = "datetime('now')";
-  const stuck = conn
-    .prepare("SELECT id, run_id FROM jobs WHERE status IN ('running','queued')")
-    .all() as Array<{ id: number; run_id: number | null }>;
-  if (stuck.length === 0) return;
-  const markJob = conn.prepare(
-    `UPDATE jobs SET status='interrupted', finished_at=${now}, error='Interrupted by server restart' WHERE id=?`
-  );
-  const markRun = conn.prepare(
-    `UPDATE runs SET status='interrupted', finished_at=${now} WHERE id=? AND status IN ('running','queued')`
-  );
-  const tx = conn.transaction(() => {
-    for (const job of stuck) {
-      markJob.run(job.id);
-      if (job.run_id) markRun.run(job.run_id);
-    }
-  });
-  tx();
 }
 
 // ---- Generic helpers ----
@@ -269,6 +507,9 @@ export function all<T = any>(sql: string, params: SqlParams = []): T[] {
 }
 export function transaction<F extends (...args: any[]) => any>(fn: F): Database.Transaction<F> {
   return getDb().transaction(fn);
+}
+export function immediateTransaction<F extends (...args: any[]) => any>(fn: F): F {
+  return getDb().transaction(fn).immediate as F;
 }
 
 // ---- App settings ----

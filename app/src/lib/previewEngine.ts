@@ -16,6 +16,7 @@ export interface DictField {
   canonical_name: string;
   is_identity: number; // 0 | 1
   is_sensitive: number; // 0 | 1
+  distribute_to_captain: number; // 0 | 1
   default_policy: string; // fill_blank | overwrite | conflict | never
   aliases: string[];
 }

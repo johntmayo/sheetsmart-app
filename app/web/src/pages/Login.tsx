@@ -26,12 +26,12 @@ export function Login({ onAuthed }: { onAuthed: () => void }) {
           <div className="brand-mark">S</div>
           <div>
             <h2 style={{ margin: 0, color: 'var(--deep-space-blue)' }}>SheetSmart</h2>
-            <div className="card-meta">Admin sign-in</div>
+            <div className="card-meta">Private workspace</div>
           </div>
         </div>
         <p className="reading-copy" style={{ marginTop: 0 }}>
-          The data-integrity backbone for the Altadena recovery outreach. Sign in to review alignment, preview
-          changes, and keep the resident data honest.
+          Manage the master resident sheet and captain zone sheets safely, with previews before changes and Undo
+          afterward.
         </p>
         <form onSubmit={submit}>
           <div className="field">

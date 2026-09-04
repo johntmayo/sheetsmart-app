@@ -5,6 +5,7 @@
 
 import { google, sheets_v4, drive_v3 } from 'googleapis';
 import { config } from './config';
+import { assertCurrentJobLease } from './jobs';
 
 // The service-account auth client, derived from googleapis so we don't depend
 // on google-auth-library directly.
@@ -12,7 +13,7 @@ type GoogleAuthClient = InstanceType<typeof google.auth.GoogleAuth>;
 
 const SCOPES = [
   'https://www.googleapis.com/auth/spreadsheets', // read + write cells/columns
-  'https://www.googleapis.com/auth/drive.readonly', // list files in the captain folder
+  'https://www.googleapis.com/auth/drive', // list, create, move, and safely undo app-created zone sheets
 ];
 
 interface ServiceAccountCredentials {
@@ -58,7 +59,7 @@ export function isConfigured(): boolean {
 function loadCredentials(): ServiceAccountCredentials {
   if (!isConfigured()) {
     throw new Error(
-      'Google is not configured. Set GOOGLE_SERVICE_ACCOUNT_JSON_B64 in your .env (see README Section A).'
+      'Google is not connected. Check the Dashboard for setup status.'
     );
   }
   let json: string;
@@ -106,8 +107,8 @@ export interface RetryOptions {
   baseDelayMs?: number;
 }
 
-// Retry with exponential backoff + jitter (handoff 4.2). Wrap EVERY Sheets/
-// Drive call in this.
+// Retry with exponential backoff + jitter. Callers must use a single attempt
+// for mutations that are not safe to repeat after an ambiguous timeout.
 export async function withRetry<T>(fn: () => Promise<T>, { attempts = 8, baseDelayMs = 700 }: RetryOptions = {}): Promise<T> {
   let lastErr: unknown;
   for (let i = 0; i < attempts; i++) {
@@ -267,18 +268,54 @@ export interface AppendValuesResult {
   updatedRows: number;
 }
 
+export interface CreatedSpreadsheetFile {
+  id: string;
+  name: string;
+  webViewLink: string;
+  modifiedTime: string;
+}
+
+export interface DrivePermissionSummary {
+  type: string;
+  role: string;
+  emailAddress: string;
+  domain: string;
+  allowFileDiscovery: boolean | null;
+}
+
+export async function listDrivePermissions(fileId: string): Promise<DrivePermissionSummary[]> {
+  const { drive } = getClients();
+  const res = await withRetry(() =>
+    drive.permissions.list({
+      fileId,
+      supportsAllDrives: true,
+      fields: 'permissions(type,role,emailAddress,domain,allowFileDiscovery)',
+    })
+  );
+  return (res.data.permissions || []).map((permission) => ({
+    type: permission.type || '',
+    role: permission.role || '',
+    emailAddress: permission.emailAddress || '',
+    domain: permission.domain || '',
+    allowFileDiscovery: permission.allowFileDiscovery ?? null,
+  }));
+}
+
 /** Update several A1 ranges in one Sheets API request. */
 export async function updateValues(spreadsheetId: string, updates: ValueRangeUpdate[]): Promise<number> {
   if (updates.length === 0) return 0;
+  assertCurrentJobLease();
   const { sheets } = getClients();
-  const res = await withRetry(() =>
-    sheets.spreadsheets.values.batchUpdate({
-      spreadsheetId,
-      requestBody: {
-        valueInputOption: 'RAW',
-        data: updates.map((update) => ({ range: update.range, values: update.values })),
-      },
-    })
+  const res = await withRetry(
+    () =>
+      sheets.spreadsheets.values.batchUpdate({
+        spreadsheetId,
+        requestBody: {
+          valueInputOption: 'RAW',
+          data: updates.map((update) => ({ range: update.range, values: update.values })),
+        },
+      }),
+    { attempts: 1 }
   );
   return res.data.totalUpdatedCells ?? 0;
 }
@@ -308,20 +345,112 @@ export async function appendValues(
   rows: unknown[][]
 ): Promise<AppendValuesResult> {
   if (rows.length === 0) return { updatedRange: '', updatedRows: 0 };
+  assertCurrentJobLease();
   const { sheets } = getClients();
-  const res = await withRetry(() =>
-    sheets.spreadsheets.values.append({
-      spreadsheetId,
-      range,
-      valueInputOption: 'RAW',
-      insertDataOption: 'INSERT_ROWS',
-      requestBody: { values: rows },
-    })
+  const res = await withRetry(
+    () =>
+      sheets.spreadsheets.values.append({
+        spreadsheetId,
+        range,
+        valueInputOption: 'RAW',
+        insertDataOption: 'INSERT_ROWS',
+        requestBody: { values: rows },
+      }),
+    { attempts: 1 }
   );
   return {
     updatedRange: res.data.updates?.updatedRange ?? '',
     updatedRows: res.data.updates?.updatedRows ?? 0,
   };
+}
+
+/** Copy an existing spreadsheet into a Drive folder, preserving formatting and validations. */
+export async function copySpreadsheetToFolder(
+  templateSpreadsheetId: string,
+  folderId: string,
+  name: string,
+  operationToken?: string
+): Promise<CreatedSpreadsheetFile> {
+  assertCurrentJobLease();
+  const { drive } = getClients();
+  const res = await withRetry(
+    () =>
+      drive.files.copy({
+        fileId: templateSpreadsheetId,
+        supportsAllDrives: true,
+        fields: 'id,name,webViewLink,modifiedTime',
+        requestBody: {
+          name,
+          parents: [folderId],
+          ...(operationToken ? { appProperties: { sheetsmartOperation: operationToken } } : {}),
+        },
+      }),
+    { attempts: 1 }
+  );
+  if (!res.data.id) throw new Error('Google Drive copied the template but returned no spreadsheet ID.');
+  return {
+    id: res.data.id,
+    name: res.data.name || name,
+    webViewLink: res.data.webViewLink || '',
+    modifiedTime: res.data.modifiedTime || '',
+  };
+}
+
+export async function findSpreadsheetByOperationToken(
+  folderId: string,
+  operationToken: string
+): Promise<CreatedSpreadsheetFile | null> {
+  const { drive } = getClients();
+  const escapedToken = operationToken.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+  const parentClause = folderId ? `'${folderId}' in parents and ` : '';
+  const res = await withRetry(() =>
+    drive.files.list({
+      q: `${parentClause}trashed=false and mimeType='application/vnd.google-apps.spreadsheet' and appProperties has { key='sheetsmartOperation' and value='${escapedToken}' }`,
+      fields: 'files(id,name,webViewLink,modifiedTime)',
+      pageSize: 2,
+      supportsAllDrives: true,
+      includeItemsFromAllDrives: true,
+    })
+  );
+  const file = res.data.files?.[0];
+  if (!file?.id) return null;
+  return {
+    id: file.id,
+    name: file.name || '',
+    webViewLink: file.webViewLink || '',
+    modifiedTime: file.modifiedTime || '',
+  };
+}
+
+/** Clear cell contents while preserving formatting and data-validation rules. */
+export async function clearValues(spreadsheetId: string, range: string): Promise<void> {
+  assertCurrentJobLease();
+  const { sheets } = getClients();
+  await withRetry(() => sheets.spreadsheets.values.clear({ spreadsheetId, range, requestBody: {} }), { attempts: 1 });
+}
+
+export async function getDriveFile(
+  fileId: string
+): Promise<{ id: string; name: string; modifiedTime: string; trashed: boolean }> {
+  const { drive } = getClients();
+  const res = await withRetry(() =>
+    drive.files.get({ fileId, supportsAllDrives: true, fields: 'id,name,modifiedTime,trashed' })
+  );
+  return {
+    id: res.data.id || fileId,
+    name: res.data.name || '',
+    modifiedTime: res.data.modifiedTime || '',
+    trashed: Boolean(res.data.trashed),
+  };
+}
+
+export async function trashDriveFile(fileId: string): Promise<void> {
+  assertCurrentJobLease();
+  const { drive } = getClients();
+  await withRetry(
+    () => drive.files.update({ fileId, supportsAllDrives: true, requestBody: { trashed: true }, fields: 'id' }),
+    { attempts: 1 }
+  );
 }
 
 /** Apply structural requests such as deleting rows. */
@@ -330,14 +459,55 @@ export async function batchUpdateSpreadsheet(
   requests: sheets_v4.Schema$Request[]
 ): Promise<sheets_v4.Schema$Response[]> {
   if (requests.length === 0) return [];
+  assertCurrentJobLease();
   const { sheets } = getClients();
-  const res = await withRetry(() =>
-    sheets.spreadsheets.batchUpdate({
-      spreadsheetId,
-      requestBody: { requests },
-    })
+  const res = await withRetry(
+    () =>
+      sheets.spreadsheets.batchUpdate({
+        spreadsheetId,
+        requestBody: { requests },
+      }),
+    { attempts: 1 }
   );
   return res.data.replies ?? [];
+}
+
+/** Remove a temporary safety lock even if the originating job lease expired. */
+export async function removeProtectedRangeCleanup(
+  spreadsheetId: string,
+  protectedRangeId: number
+): Promise<void> {
+  const { sheets } = getClients();
+  await withRetry(
+    () =>
+      sheets.spreadsheets.batchUpdate({
+        spreadsheetId,
+        requestBody: {
+          requests: [{ deleteProtectedRange: { protectedRangeId } }],
+        },
+      }),
+    { attempts: 1 }
+  );
+}
+
+export async function listProtectedRanges(
+  spreadsheetId: string
+): Promise<Array<{ protectedRangeId: number; description: string }>> {
+  const { sheets } = getClients();
+  const res = await withRetry(() =>
+    sheets.spreadsheets.get({
+      spreadsheetId,
+      fields: 'sheets.protectedRanges(protectedRangeId,description)',
+    })
+  );
+  return (res.data.sheets || []).flatMap((sheet) =>
+    (sheet.protectedRanges || [])
+      .filter((range) => range.protectedRangeId != null)
+      .map((range) => ({
+        protectedRangeId: Number(range.protectedRangeId),
+        description: String(range.description || ''),
+      }))
+  );
 }
 
 export { SCOPES };

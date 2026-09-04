@@ -1,6 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert';
-import { planPullToMaster, planPullNewResidents, fingerprintPullChanges } from '../src/lib/pullEngine';
+import {
+  planPullToMaster,
+  planPullNewResidents,
+  planPullNewResidentsFromFolder,
+  fingerprintPullChanges,
+} from '../src/lib/pullEngine';
 import type { Grid } from '../src/lib/mergeEngine';
 
 const MASTER: Grid = [
@@ -277,4 +282,93 @@ test('fingerprintPullChanges: stable for the plan, sensitive to captain edits', 
   const changed = planPullToMaster(MASTER, editedCaptain, { policies: POLICIES });
   assert.notStrictEqual(base.fingerprint, changed.fingerprint);
   assert.strictEqual(fingerprintPullChanges([]), fingerprintPullChanges([]));
+});
+
+test('planPullNewResidentsFromFolder: groups a new household by address_id', () => {
+  const master: Grid = [
+    ['address_id', 'resident_id', 'Resident Name', 'House', 'Street', 'Email'],
+    ['A1', 'M1', 'Existing Person', '10', 'Oak St', ''],
+  ];
+  const captain: Grid = [
+    ['address_id', 'resident_id', 'Resident Name', 'House', 'Street', 'Email'],
+    ['A2', 'C1', 'New Person One', '20', 'Pine St', 'one@example.com'],
+    ['A2', 'C2', 'New Person Two', '20', 'Pine St', 'two@example.com'],
+  ];
+  const plan = planPullNewResidentsFromFolder(master, [
+    { spreadsheetId: 'S1', spreadsheetName: 'Zone 1', tabName: 'Sheet1', zone: 'Zone 1', grid: captain },
+  ]);
+
+  assert.deepStrictEqual(plan.errors, []);
+  assert.strictEqual(plan.addresses.length, 1);
+  assert.strictEqual(plan.addresses[0].addressId, 'A2');
+  assert.strictEqual(plan.addresses[0].kind, 'new_address');
+  assert.deepStrictEqual(plan.addresses[0].residents.map((resident) => resident.residentId), ['C1', 'C2']);
+});
+
+test('planPullNewResidentsFromFolder: distinguishes a new resident at an existing address', () => {
+  const master: Grid = [
+    ['address_id', 'resident_id', 'Resident Name'],
+    ['A1', 'M1', 'Existing Person'],
+  ];
+  const captain: Grid = [
+    ['address_id', 'resident_id', 'Resident Name'],
+    ['A1', 'M1', 'Existing Person'],
+    ['A1', 'C1', 'New Housemate'],
+  ];
+  const plan = planPullNewResidentsFromFolder(master, [
+    { spreadsheetId: 'S1', spreadsheetName: 'Zone 1', tabName: 'Sheet1', zone: 'Zone 1', grid: captain },
+  ]);
+
+  assert.strictEqual(plan.addresses[0].kind, 'existing_address');
+  assert.deepStrictEqual(plan.addresses[0].residents.map((resident) => resident.residentId), ['C1']);
+});
+
+test('planPullNewResidentsFromFolder: blocks duplicate identities across captain sheets', () => {
+  const master: Grid = [['address_id', 'resident_id', 'Resident Name']];
+  const first: Grid = [
+    ['address_id', 'resident_id', 'Resident Name'],
+    ['A1', 'C1', 'Ambiguous Person'],
+  ];
+  const second: Grid = [
+    ['address_id', 'resident_id', 'Resident Name'],
+    ['A1', 'C1', 'Ambiguous Person'],
+  ];
+  const plan = planPullNewResidentsFromFolder(master, [
+    { spreadsheetId: 'S1', spreadsheetName: 'Zone 1', tabName: 'Sheet1', zone: 'Zone 1', grid: first },
+    { spreadsheetId: 'S2', spreadsheetName: 'Zone 2', tabName: 'Sheet1', zone: 'Zone 2', grid: second },
+  ]);
+
+  assert.strictEqual(plan.addresses.length, 0);
+  assert.ok(plan.blocked.some((block) => /appears more than once/i.test(block.reason)));
+});
+
+test('planPullNewResidentsFromFolder: blocks rows without address_id', () => {
+  const master: Grid = [['address_id', 'resident_id', 'Resident Name']];
+  const captain: Grid = [
+    ['address_id', 'resident_id', 'Resident Name'],
+    ['', 'C1', 'No Address Identity'],
+  ];
+  const plan = planPullNewResidentsFromFolder(master, [
+    { spreadsheetId: 'S1', spreadsheetName: 'Zone 1', tabName: 'Sheet1', zone: 'Zone 1', grid: captain },
+  ]);
+
+  assert.strictEqual(plan.addresses.length, 0);
+  assert.match(plan.blocked[0].reason, /no address_id/i);
+});
+
+test('planPullNewResidentsFromFolder: permits address-only placeholder rows when configured', () => {
+  const master: Grid = [['address_id', 'resident_id', 'Resident Name', 'House', 'Street']];
+  const captain: Grid = [
+    ['address_id', 'resident_id', 'Resident Name', 'House', 'Street'],
+    ['A2', 'C1', '', '20', 'Pine St'],
+  ];
+  const plan = planPullNewResidentsFromFolder(
+    master,
+    [{ spreadsheetId: 'S1', spreadsheetName: 'Zone 1', tabName: 'Sheet1', zone: 'Zone 1', grid: captain }],
+    { requiredColumns: [] }
+  );
+
+  assert.strictEqual(plan.blocked.length, 0);
+  assert.strictEqual(plan.addresses.length, 1);
+  assert.strictEqual(plan.addresses[0].residents[0].residentName, '');
 });

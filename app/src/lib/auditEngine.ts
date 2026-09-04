@@ -172,6 +172,11 @@ export interface AuditReport {
   apnInconsistencies: ApnInconsistencyRow[];
 }
 
+export interface AuditOptions {
+  /** Master columns that captain sheets are expected to carry. */
+  captainDistributedHeaders?: string[];
+}
+
 // -------  Blank / cell helpers (legacy parity)  -------
 
 function isBlankCell(value: CellValue): boolean {
@@ -639,10 +644,15 @@ function findDuplicateResidentIds(entries: ResidentIdEntry[]): DuplicateResident
 
 // -------  Top-level audit (legacy runAudit, minus the spreadsheet writer)  -------
 
-export function runAudit(masterGrid: Grid, sheets: SheetInput[]): AuditReport {
+export function runAudit(masterGrid: Grid, sheets: SheetInput[], options: AuditOptions = {}): AuditReport {
   const master = buildMasterModel(masterGrid);
   const skip = master.rowMembershipSkipReason;
+  const expectedHeaders = options.captainDistributedHeaders
+    ? master.headers.filter((header) => options.captainDistributedHeaders!.includes(header))
+    : master.headers;
 
+  const expectedSet: Record<string, true> = {};
+  expectedHeaders.forEach((h) => (expectedSet[h] = true));
   const masterSet: Record<string, true> = {};
   master.headers.forEach((h) => (masterSet[h] = true));
 
@@ -685,8 +695,8 @@ export function runAudit(masterGrid: Grid, sheets: SheetInput[]): AuditReport {
       if (h !== '') sheetSet[h] = true;
     });
 
-    const missing = master.headers.filter((h) => !sheetSet[h]);
-    const extra = headers.filter((h) => h !== '' && !masterSet[h]);
+    const missing = expectedHeaders.filter((h) => !sheetSet[h]);
+    const extra = headers.filter((h) => h !== '' && !expectedSet[h]);
 
     let status: SheetStatus = 'Match';
     if (missing.length > 0 && extra.length > 0) status = 'Missing + Extra';
@@ -761,7 +771,7 @@ export function runAudit(masterGrid: Grid, sheets: SheetInput[]): AuditReport {
 
   return {
     generatedAt: new Date().toISOString(),
-    masterHeaders: master.headers,
+    masterHeaders: expectedHeaders,
     summary,
     sheets: sheetAudits,
     columnDetail,

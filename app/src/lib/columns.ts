@@ -3,6 +3,8 @@
 // Matching is kept visible/configurable: callers can report which real header
 // resolved to which logical field instead of trusting a silent guess.
 
+import { createHash } from 'node:crypto';
+
 // A header cell as read from a sheet's first row.
 export type Header = string | null | undefined;
 
@@ -14,6 +16,16 @@ export interface ColumnResolution {
   matched: boolean;
   header: string | null;
   index: number;
+}
+
+export interface DictionaryAliasSpec {
+  canonicalName: string;
+  aliases: string[];
+}
+
+export interface CanonicalHeaderResult {
+  headers: string[];
+  errors: string[];
 }
 
 export function normalizeKey(s: unknown): string {
@@ -57,6 +69,62 @@ export function resolveColumn(
   };
 }
 
+/**
+ * Replace recognized aliases with their dictionary standard name while
+ * preserving column order. Ambiguous aliases and duplicate logical columns are
+ * blocked rather than guessed.
+ */
+export function canonicalizeHeaders(headers: readonly unknown[], fields: DictionaryAliasSpec[]): CanonicalHeaderResult {
+  const errors: string[] = [];
+  const canonicalByKey = new Map<string, Set<string>>();
+  for (const field of fields) {
+    for (const candidate of [field.canonicalName, ...field.aliases]) {
+      const key = normalizeKey(candidate);
+      if (!key) continue;
+      const names = canonicalByKey.get(key) || new Set<string>();
+      names.add(field.canonicalName);
+      canonicalByKey.set(key, names);
+    }
+  }
+
+  const resolved = headers.map((raw) => {
+    const header = String(raw == null ? '' : raw).trim();
+    if (!header) return '';
+    const key = normalizeKey(header);
+    const exactCanonical = fields.filter((field) => normalizeKey(field.canonicalName) === key);
+    if (exactCanonical.length === 1) return exactCanonical[0].canonicalName;
+    const matches = canonicalByKey.get(key);
+    if (!matches || matches.size === 0) return header;
+    if (matches.size > 1) {
+      errors.push(`Column "${header}" matches more than one field: ${[...matches].join(', ')}.`);
+      return header;
+    }
+    return [...matches][0];
+  });
+
+  const indexesByCanonical = new Map<string, number[]>();
+  resolved.forEach((header, index) => {
+    if (!fields.some((field) => field.canonicalName === header)) return;
+    indexesByCanonical.set(header, [...(indexesByCanonical.get(header) || []), index]);
+  });
+  for (const [canonical, indexes] of indexesByCanonical) {
+    if (indexes.length > 1) {
+      errors.push(`More than one column resolves to "${canonical}" (columns ${indexes.map((index) => index + 1).join(', ')}).`);
+    }
+  }
+  return { headers: resolved, errors };
+}
+
+export function fingerprintDictionaryAliases(fields: DictionaryAliasSpec[]): string {
+  const lines = fields
+    .map(
+      (field) =>
+        `${field.canonicalName}\t${[...field.aliases].map((alias) => normalizeKey(alias)).sort().join('|')}`
+    )
+    .sort();
+  return createHash('sha256').update(lines.join('\n')).digest('hex');
+}
+
 // 0 -> A, 25 -> Z, 26 -> AA (matches legacy columnLetter_).
 export function columnLetter(index: number): string {
   let letter = '';
@@ -93,7 +161,44 @@ export function detectSheetZone(
       topCount = counts[z];
     }
   }
+  if (topCount > 0 && Object.values(counts).filter((count) => count === topCount).length > 1) return '';
   return topZone;
+}
+
+/**
+ * Folder registry fallback for newly created sheets whose data rows are still
+ * blank or whose legacy export contains duplicate ZoneName headers.
+ */
+export function detectSheetZoneWithName(
+  headers: Header[],
+  dataRows: CellRow[],
+  spreadsheetName: string,
+  zoneHeader = 'ZoneName'
+): string {
+  const match = String(spreadsheetName || '').match(/(?:^|[^a-z0-9])zone\s*(\d+)\b/i);
+  const fromName = match ? `Zone ${Number(match[1])}` : '';
+  const matchingHeaders = headers.filter(
+    (header) => String(header == null ? '' : header).trim().toLowerCase() === zoneHeader.toLowerCase()
+  );
+  if (matchingHeaders.length > 1) {
+    const indexes = headers.flatMap((header, index) =>
+      String(header == null ? '' : header).trim().toLowerCase() === zoneHeader.toLowerCase() ? [index] : []
+    );
+    const populatedZones = new Set(
+      dataRows
+        .flatMap((row) => indexes.map((index) => String(row[index] == null ? '' : row[index]).trim()))
+        .filter(Boolean)
+    );
+    if (populatedZones.size > 1) return '';
+    if (populatedZones.size === 1) {
+      const populated = [...populatedZones][0];
+      return fromName && populated !== fromName ? '' : populated;
+    }
+    return fromName;
+  }
+  const fromRows = detectSheetZone(headers, dataRows, zoneHeader);
+  if (fromRows) return fromName && fromRows !== fromName ? '' : fromRows;
+  return fromName;
 }
 
 // A single row of cell values, as returned by the Sheets API.

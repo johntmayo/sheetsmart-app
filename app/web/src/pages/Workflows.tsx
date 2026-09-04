@@ -18,13 +18,20 @@ import type {
   PushMissingSheet,
 } from '../lib/types';
 import { EmptyState, ErrorState, Modal, SectionHead, Spinner } from '../components/ui';
+import { FolderReconcilePlaybook } from '../components/FolderReconcilePlaybook';
+import { CaptainImportPlaybook } from '../components/CaptainImportPlaybook';
+import { ZoneSheetsPlaybook } from '../components/ZoneSheetsPlaybook';
+import { AddressIntakePlaybook } from '../components/AddressIntakePlaybook';
 
-// Playbooks whose guided dry-run preview isn't wired yet (later phases). Shown so
-// the Operator sees the full map of what's coming.
 const UPCOMING = [
-  { title: 'Run any playbook across the whole captain folder', engine: 'folder-wide execution (gated)' },
-  { title: 'Fix / retire a column everywhere', engine: 'rename / delete (destructive, gated)' },
+  { title: 'Rename or remove a column everywhere' },
 ];
+
+function previewDescription(key: string): string {
+  if (key === 'import_sales') return 'Matches properties by parcel number (APN) and shows what the master would receive.';
+  if (key === 'push_master') return 'Shows which existing captain-sheet cells would be filled from the master.';
+  return 'Shows which master residents are missing from their captain zone sheet.';
+}
 
 export function Workflows() {
   const { data, loading, error } = useAsync<PreviewPlaybook[]>(() => api.get('/preview/playbooks'));
@@ -62,28 +69,61 @@ export function Workflows() {
     <>
       <SectionHead title="Playbooks" />
       <p className="reading-copy" style={{ marginTop: 0 }}>
-        Playbooks are the plain-language tasks you run. Each shows a <strong>preview</strong> first — a dry run that
-        explains exactly what it would do, in plain English. The first live playbook is intentionally locked to safe
-        copies while its one-click undo is proven.
+        These workflows scan your live sheets first. Nothing changes until you select and approve specific items.
+        Every change is recorded and can be undone from Runs.
       </p>
 
-      <SafeCopyPlaybook />
-      <EnrichZonesPlaybook />
-      <MoveResidentsPlaybook />
-      <PullToMasterPlaybook />
-      <NewResidentsPlaybook />
+      <div className="section-head" style={{ marginTop: 24 }}>
+        <h2>When Mapbox zones change</h2>
+      </div>
+      <p className="reading-copy" style={{ marginTop: 0 }}>
+        If you created a new zone, make its captain sheet first. Then run the boundary-change workflow to move people.
+      </p>
+      <ZoneSheetsPlaybook />
+      <FolderReconcilePlaybook />
 
       <div className="section-head" style={{ marginTop: 32 }}>
-        <h2>Read-only previews</h2>
+        <h2>When captains add people</h2>
       </div>
+      <p className="reading-copy" style={{ marginTop: 0 }}>
+        Use this when a captain added someone who is not on the master resident sheet yet.
+      </p>
+      <CaptainImportPlaybook />
+
+      <div className="section-head" style={{ marginTop: 32 }}>
+        <h2>When you have a separate list of missing addresses</h2>
+      </div>
+      <p className="reading-copy" style={{ marginTop: 0 }}>
+        Use this occasional intake workflow to compare a large outside address list before adding clearly new
+        address-only records to the master.
+      </p>
+      <AddressIntakePlaybook />
+
+      <details style={{ marginTop: 28 }}>
+        <summary className="reading-copy" style={{ cursor: 'pointer' }}>
+          Practice on copy spreadsheets (testing only)
+        </summary>
+        <SafeCopyPlaybook />
+        <EnrichZonesPlaybook />
+        <MoveResidentsPlaybook />
+        <PullToMasterPlaybook />
+        <NewResidentsPlaybook />
+      </details>
+
+      <div className="section-head" style={{ marginTop: 32 }}>
+        <h2>Data sync previews (no changes yet)</h2>
+      </div>
+      <p className="reading-copy" style={{ marginTop: 0 }}>
+        These checks show what would change. Applying their results to live sheets is not enabled yet.
+      </p>
       <div className="card-grid">
         {playbooks.map((p) => (
           <div className="card" key={p.key}>
             <h3>{p.title}</h3>
-            <div className="card-meta">Engine: {p.engine}</div>
+            <div className="card-meta">{previewDescription(p.key)}</div>
             <div className="btn-row" style={{ marginTop: 12 }}>
               <button className="btn" onClick={() => runPreview(p)}>
-                Preview
+                Preview changes
               </button>
             </div>
           </div>
@@ -91,16 +131,16 @@ export function Workflows() {
       </div>
 
       <div className="section-head" style={{ marginTop: 32 }}>
-        <h2>Coming next</h2>
+        <h2>Planned</h2>
       </div>
       <div className="card-grid">
         {UPCOMING.map((p) => (
           <div className="card" key={p.title}>
             <h3>{p.title}</h3>
-            <div className="card-meta">Engine: {p.engine}</div>
+            <div className="card-meta">This workflow is not available yet.</div>
             <div className="btn-row" style={{ marginTop: 12 }}>
               <button className="btn secondary small" disabled title="Preview for this playbook is coming in a later step">
-                Preview
+                Not available yet
               </button>
             </div>
           </div>
@@ -110,7 +150,7 @@ export function Workflows() {
       {playbooks.length === 0 && (
         <EmptyState
           title="No previewable playbooks yet"
-          body="Connect a master, a captain folder, and a sales source under Sources to preview the core syncs."
+          body="Add your master sheet, captain folder, and sales tracker under Sources, then return here."
         />
       )}
 
@@ -124,9 +164,6 @@ export function Workflows() {
           <div className="btn-row" style={{ marginTop: 16 }}>
             <button className="btn secondary" onClick={close}>
               Close
-            </button>
-            <button className="btn" disabled title="Live runs arrive in the next phase (with undo)">
-              Run it live
             </button>
           </div>
         </Modal>
@@ -223,7 +260,7 @@ function SafeCopyPlaybook() {
   const target = data?.target;
   return (
     <div className="card" style={{ borderColor: 'var(--golden-orange)', marginTop: 20 }}>
-      <div className="eyebrow">First reversible live playbook · copies only</div>
+      <div className="eyebrow">Practice copy · test before using live sheets</div>
       <h3 style={{ marginTop: 6 }}>Add new residents to one copied captain sheet</h3>
       <p className="reading-copy" style={{ marginBottom: 12 }}>
         This is the safety proving ground: preview the exact rows, approve them, add them to one copy, and undo the run
@@ -410,7 +447,7 @@ function EnrichZonesPlaybook() {
 
   return (
     <div className="card" style={{ borderColor: 'var(--golden-orange)', marginTop: 20 }}>
-      <div className="eyebrow">Second reversible live playbook · master copy only</div>
+      <div className="eyebrow">Practice copy · master sheet only</div>
       <h3 style={{ marginTop: 6 }}>Enrich zones on the raw master copy</h3>
       <p className="reading-copy" style={{ marginBottom: 12 }}>
         Reads the raw <strong>Master Data File</strong> tab on your master copy, computes ZoneName and captain (NC)
@@ -648,7 +685,7 @@ function MoveResidentsPlaybook() {
 
   return (
     <div className="card" style={{ borderColor: 'var(--golden-orange)', marginTop: 20 }}>
-      <div className="eyebrow">Third reversible live playbook · copies only</div>
+      <div className="eyebrow">Practice copy · captain sheets only</div>
       <h3 style={{ marginTop: 6 }}>Move residents between captain sheet copies</h3>
       <p className="reading-copy" style={{ marginBottom: 12 }}>
         Move people from one captain sheet copy to another after a zone redraw. You approve each person. SheetSmart
@@ -961,7 +998,7 @@ function PullToMasterPlaybook() {
 
   return (
     <div className="card" style={{ borderColor: 'var(--golden-orange)', marginTop: 20 }}>
-      <div className="eyebrow">Fourth reversible live playbook · copies only</div>
+      <div className="eyebrow">Practice copy · master and captain sheets</div>
       <h3 style={{ marginTop: 6 }}>Pull captain edits into the master copy</h3>
       <p className="reading-copy" style={{ marginBottom: 12 }}>
         Compares the captain copy against the master copy by <span className="mono">resident_id</span> and brings
@@ -977,7 +1014,7 @@ function PullToMasterPlaybook() {
             <strong>{target.captainName}</strong> ({target.captainTab}) → <strong>{target.masterName}</strong> (
             {target.masterTab})
             <br />
-            Fill blanks only, unless the Field Dictionary marks a column <span className="mono">overwrite</span>
+            Fills blank cells only, unless that column is set to <strong>Replace existing</strong> under Fields.
           </div>
           <div className="btn-row">
             <button className="btn highlight" onClick={runPreview} disabled={previewing}>
@@ -1187,7 +1224,7 @@ function NewResidentsPlaybook() {
 
   return (
     <div className="card" style={{ borderColor: 'var(--golden-orange)', marginTop: 20 }}>
-      <div className="eyebrow">Fifth reversible live playbook · copies only</div>
+      <div className="eyebrow">Practice copy · new captain entries</div>
       <h3 style={{ marginTop: 6 }}>Add captain-created residents to the master copy</h3>
       <p className="reading-copy" style={{ marginBottom: 12 }}>
         Finds people a captain added to their sheet who have no row on the master, and — only for the rows you tick —

@@ -2,6 +2,7 @@ import type { Router, Request, Response } from 'express';
 import * as google from '../google';
 import type { Deps } from '../types';
 import { runAudit, type SheetInput, type Grid } from '../lib/auditEngine';
+import { canonicalizeHeaders, type DictionaryAliasSpec } from '../lib/columns';
 
 interface ConnectionRow {
   id: number;
@@ -35,7 +36,7 @@ export default function registerAuditRoutes(api: Router, { db }: Deps): void {
         return res.status(400).json({
           ok: false,
           error:
-            'Google is not configured yet. Add GOOGLE_SERVICE_ACCOUNT_JSON_B64 to your .env (README Section A), then restart.',
+            'Google is not connected. Check the Dashboard for setup status.',
         });
       }
 
@@ -91,7 +92,7 @@ export default function registerAuditRoutes(api: Router, { db }: Deps): void {
       if (!google.isConfigured()) {
         return res.status(400).json({
           error:
-            'Google is not configured yet. Add GOOGLE_SERVICE_ACCOUNT_JSON_B64 to your .env (README Section A), then restart.',
+            'Google is not connected. Check the Dashboard for setup status.',
         });
       }
 
@@ -113,21 +114,38 @@ export default function registerAuditRoutes(api: Router, { db }: Deps): void {
       const runId = Number(runInsert.lastInsertRowid);
 
       try {
+        const dictionary = loadDictionaryAliases(db);
         const masterGrid = await readSheetGrid(master.google_id, master.source_tab || undefined);
+        const masterHeaders = canonicalizeHeaders(masterGrid[0] || [], dictionary);
+        if (masterHeaders.errors.length > 0) {
+          throw new Error(`Master columns are ambiguous: ${masterHeaders.errors.join(' ')}`);
+        }
+        const canonicalMaster: Grid = [masterHeaders.headers, ...masterGrid.slice(1)];
 
         const files = await google.listSpreadsheetsInFolder(folder.google_id);
         const sheets: SheetInput[] = [];
         for (const f of files) {
           try {
             const data = await readSheetGrid(f.id);
-            sheets.push({ name: f.name, url: f.webViewLink, data });
+            const headerResult = canonicalizeHeaders(data[0] || [], dictionary);
+            if (headerResult.errors.length > 0) {
+              sheets.push({ name: f.name, url: f.webViewLink, error: headerResult.errors.join(' ') });
+            } else {
+              sheets.push({ name: f.name, url: f.webViewLink, data: [headerResult.headers, ...data.slice(1)] });
+            }
           } catch (e) {
             // One bad sheet must never kill the whole run (legacy invariant).
             sheets.push({ name: f.name, url: f.webViewLink, error: friendlyGoogleError(e) });
           }
         }
 
-        const report = runAudit(masterGrid, sheets);
+        const captainDistributedHeaders = db
+          .all<{ canonical_name: string }>(
+            `SELECT canonical_name FROM dictionary_fields
+             WHERE distribute_to_captain=1 ORDER BY sort_order, id`
+          )
+          .map((field) => field.canonical_name);
+        const report = runAudit(canonicalMaster, sheets, { captainDistributedHeaders });
 
         db.setSetting(LAST_AUDIT_KEY, JSON.stringify({ runId, report }));
         db.run(
@@ -180,11 +198,24 @@ export default function registerAuditRoutes(api: Router, { db }: Deps): void {
   });
 }
 
+function loadDictionaryAliases(db: Deps['db']): DictionaryAliasSpec[] {
+  return db
+    .all<{ id: number; canonical_name: string }>(
+      'SELECT id, canonical_name FROM dictionary_fields ORDER BY sort_order, id'
+    )
+    .map((field) => ({
+      canonicalName: field.canonical_name,
+      aliases: db
+        .all<{ alias: string }>('SELECT alias FROM dictionary_aliases WHERE field_id=? ORDER BY alias', [field.id])
+        .map((row) => row.alias),
+    }));
+}
+
 function friendlyGoogleError(e: unknown): string {
   const msg = String((e as Error)?.message || e);
   if (/permission|not have access|forbidden|403/i.test(msg)) {
     return (
-      'Google returned a permission error. Make sure the sheet/folder is shared with the service account as Editor (README Section B). Details: ' +
+      'Google denied access. Share the sheet or folder with SheetSmart’s Google account as Editor. Details: ' +
       msg
     );
   }

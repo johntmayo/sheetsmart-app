@@ -11,6 +11,7 @@ interface DictionaryFieldRow {
   is_identity: number;
   is_sensitive: number;
   is_text_safe: number;
+  distribute_to_captain: number;
   default_policy: string;
   notes: string;
   sort_order: number;
@@ -52,14 +53,16 @@ export default function registerDictionaryRoutes(api: Router, { db }: Deps): voi
     try {
       const info = db.run(
         `INSERT INTO dictionary_fields
-           (canonical_name, data_type, is_identity, is_sensitive, is_text_safe, default_policy, notes, sort_order)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+           (canonical_name, data_type, is_identity, is_sensitive, is_text_safe, distribute_to_captain,
+            default_policy, notes, sort_order)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           canonical,
           body.data_type || 'text',
           body.is_identity ? 1 : 0,
           body.is_sensitive ? 1 : 0,
           body.is_text_safe ? 1 : 0,
+          body.distribute_to_captain === false ? 0 : 1,
           body.default_policy || 'fill_blank',
           String(body.notes || ''),
           maxOrder + 1,
@@ -93,7 +96,7 @@ export default function registerDictionaryRoutes(api: Router, { db }: Deps): voi
       db.run(
         `UPDATE dictionary_fields SET
            canonical_name = ?, data_type = ?, is_identity = ?, is_sensitive = ?,
-           is_text_safe = ?, default_policy = ?, notes = ?
+           is_text_safe = ?, distribute_to_captain = ?, default_policy = ?, notes = ?
          WHERE id = ?`,
         [
           canonical,
@@ -101,6 +104,9 @@ export default function registerDictionaryRoutes(api: Router, { db }: Deps): voi
           body.is_identity != null ? (body.is_identity ? 1 : 0) : existing.is_identity,
           body.is_sensitive != null ? (body.is_sensitive ? 1 : 0) : existing.is_sensitive,
           body.is_text_safe != null ? (body.is_text_safe ? 1 : 0) : existing.is_text_safe,
+          body.distribute_to_captain != null
+            ? (body.distribute_to_captain ? 1 : 0)
+            : existing.distribute_to_captain,
           body.default_policy || existing.default_policy,
           body.notes != null ? String(body.notes) : existing.notes,
           req.params.id,

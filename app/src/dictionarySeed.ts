@@ -28,6 +28,7 @@ export interface SeedField {
   is_identity: 0 | 1;
   is_sensitive: 0 | 1;
   is_text_safe: 0 | 1;
+  distribute_to_captain: 0 | 1;
   default_policy: Policy;
   notes: string;
   sort_order: number;
@@ -37,7 +38,39 @@ export interface SeedField {
 const IDENTITY = new Set(['resident_id']);
 const CHECKBOX = new Set(['Address - For Sale', 'Address - Sold Since Fire']);
 const TEXT_SAFE = new Set(['APN', 'resident_id', 'address_id', 'Zip', '_SitusUnit']);
-const SENSITIVE = new Set(['Home Phone', 'Cell', 'Email', 'Person Notes', 'NC Phone', 'NC Email']);
+const MASTER_ONLY = new Set([
+  'Address - For Sale',
+  'Address - Sold Since Fire',
+  'Latest Sale Date',
+  'Latest Sale Price',
+  'Latest New Owner',
+  'Lot SqFt',
+  'Sales History',
+]);
+const SENSITIVE = new Set([
+  'Age',
+  'Gender',
+  'Home Phone',
+  'Cell',
+  'Email',
+  'Damage',
+  'Address Plan',
+  'Build Status',
+  'Person - Renter',
+  'Person - Needs Follow-Up',
+  'Person - Unable to Reach',
+  'Person Notes',
+  'Last Outreach Attempt Date',
+  'Outreach Log',
+  'Address Notes',
+  'Former Resident',
+  'Deceased',
+  'Wants_Updates',
+  'Remediation Status',
+  'Successfully Contacted',
+  'NC Phone',
+  'NC Email',
+]);
 
 // Known drift aliases for the high-churn fields (handoff 4.3). Canonical names
 // are always matched implicitly by the normalizing matcher, so we only list
@@ -68,7 +101,7 @@ export const MASTER_FIELDS: string[] = [
   'Outreach Log', 'Address Notes', 'Address - Unit Type', 'Captain Assigned',
   'Address - For Sale', 'Address - Sold Since Fire', 'Latest Sale Date',
   'Latest Sale Price', 'Latest New Owner', 'Lot SqFt', 'Sales History',
-  'Former Resident', 'Deceased', 'Wants_Updates', 'ZoneName', 'NC Name',
+  'Former Resident', 'Deceased', 'Deleted Record', 'Wants_Updates', 'ZoneName', 'NC Name',
   'NC Phone', 'NC Email', 'Remediation Status', 'Successfully Contacted',
 ];
 
@@ -90,6 +123,7 @@ export function buildSeed(): SeedField[] {
     is_identity: IDENTITY.has(name) ? 1 : 0,
     is_sensitive: SENSITIVE.has(name) ? 1 : 0,
     is_text_safe: TEXT_SAFE.has(name) ? 1 : 0,
+    distribute_to_captain: MASTER_ONLY.has(name) ? 0 : 1,
     default_policy: (IDENTITY.has(name) ? 'never' : 'fill_blank') as Policy,
     notes: name === 'ZoneName' ? 'Zone is inferred as the mode of this column per captain sheet.' : '',
     sort_order: i,

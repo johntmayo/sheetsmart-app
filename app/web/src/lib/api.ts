@@ -3,9 +3,11 @@
 
 export class ApiError extends Error {
   status: number;
-  constructor(message: string, status: number) {
+  details: unknown;
+  constructor(message: string, status: number, details: unknown = null) {
     super(message);
     this.status = status;
+    this.details = details;
   }
 }
 
@@ -28,7 +30,7 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
     const msg =
       (data && typeof data === 'object' && 'error' in data && (data as { error: string }).error) ||
       `Request failed (${res.status})`;
-    throw new ApiError(String(msg), res.status);
+    throw new ApiError(String(msg), res.status, data);
   }
   return data as T;
 }

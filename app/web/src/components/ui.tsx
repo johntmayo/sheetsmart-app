@@ -60,13 +60,31 @@ const RUN_STATUS: Record<string, StatusKind> = {
   disconnected: 'neutral',
 };
 
+const STATUS_LABEL: Record<string, string> = {
+  succeeded: 'Completed',
+  running: 'In progress',
+  queued: 'Waiting',
+  failed: 'Failed',
+  cancelled: 'Cancelled',
+  interrupted: 'Stopped partway',
+  connected: 'Connected',
+  disconnected: 'Not connected',
+};
+
+const POLICY_LABEL: Record<string, string> = {
+  fill_blank: 'Fill if blank',
+  overwrite: 'Replace existing',
+  conflict: 'Ask me',
+  never: 'Never write',
+};
+
 export function StatusPill({ status }: { status: string }) {
   const kind = RUN_STATUS[status] ?? 'neutral';
-  return <span className={`pill ${kind}`}>{status}</span>;
+  return <span className={`pill ${kind}`}>{STATUS_LABEL[status] ?? status}</span>;
 }
 
 export function PolicyPill({ policy }: { policy: string }) {
-  return <span className={`pill policy-${policy}`}>{policy}</span>;
+  return <span className={`pill policy-${policy}`}>{POLICY_LABEL[policy] ?? policy}</span>;
 }
 
 export function Modal({

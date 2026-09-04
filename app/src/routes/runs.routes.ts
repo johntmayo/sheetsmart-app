@@ -1,5 +1,6 @@
 import type { Router, Request, Response } from 'express';
 import type { Deps } from '../types';
+import { normalizeKey } from '../lib/columns';
 
 // Run history + run review (spec "Run Review"). For a live run, the run record
 // and its detail rows ARE the permanent audit trail.
@@ -18,7 +19,11 @@ export default function registerRunRoutes(api: Router, { db }: Deps): void {
                    AND s.reverted_by_run_id IS NULL) AS unreverted_cell_count,
                 (SELECT COUNT(*) FROM run_snapshots s
                  WHERE s.run_id = runs.id AND s.operation = 'row_delete'
-                   AND s.reverted_by_run_id IS NULL) AS unreverted_delete_count
+                   AND s.reverted_by_run_id IS NULL) AS unreverted_delete_count,
+                (SELECT COUNT(*) FROM run_created_files f
+                 WHERE f.run_id = runs.id) AS created_file_count,
+                (SELECT COUNT(*) FROM run_created_files f
+                 WHERE f.run_id = runs.id AND f.reverted_by_run_id IS NULL) AS unreverted_created_file_count
          FROM runs ORDER BY id DESC LIMIT 200`
       )
     );
@@ -53,12 +58,40 @@ export default function registerRunRoutes(api: Router, { db }: Deps): void {
       where += ' AND type = ?';
       params.push(type);
     }
-    const rows = db.all(
-      `SELECT id, spreadsheet, row, column, resident_id, type, existing_value, incoming_value, message
+    const rows = db.all<{
+      id: number;
+      spreadsheet: string;
+      row: string;
+      column: string;
+      resident_id: string;
+      type: string;
+      existing_value: string;
+      incoming_value: string;
+      message: string;
+      value_redacted: number;
+    }>(
+      `SELECT id, spreadsheet, row, column, resident_id, type, existing_value, incoming_value, message, value_redacted
        FROM run_log_entries WHERE ${where} ORDER BY id LIMIT ? OFFSET ?`,
       [...params, limit, offset]
     );
-    res.json(rows);
+    const sensitiveKeys = new Set<string>();
+    for (const field of db.all<{ id: number; canonical_name: string }>(
+      'SELECT id, canonical_name FROM dictionary_fields WHERE is_sensitive=1'
+    )) {
+      sensitiveKeys.add(normalizeKey(field.canonical_name));
+      for (const alias of db.all<{ alias: string }>('SELECT alias FROM dictionary_aliases WHERE field_id=?', [field.id])) {
+        sensitiveKeys.add(normalizeKey(alias.alias));
+      }
+    }
+    res.json(
+      rows.map((row) => {
+        const redacted =
+          row.value_redacted === 1 || row.type === 'sensitive' || sensitiveKeys.has(normalizeKey(row.column));
+        return redacted
+          ? { ...row, existing_value: '[private field hidden]', incoming_value: '[private field hidden]', value_redacted: true }
+          : { ...row, value_redacted: false };
+      })
+    );
   });
 
   // Conflicts review (spec). Derived rows with open/resolved status.

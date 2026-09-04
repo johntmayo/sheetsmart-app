@@ -7,6 +7,12 @@ import { useToast } from '../components/Toast';
 
 const TYPES: FieldDataType[] = ['text', 'number', 'date', 'checkbox'];
 const POLICIES: Policy[] = ['fill_blank', 'overwrite', 'conflict', 'never'];
+const POLICY_LABEL: Record<Policy, string> = {
+  fill_blank: 'Fill if blank',
+  overwrite: 'Replace existing',
+  conflict: 'Ask me',
+  never: 'Never write',
+};
 
 const TYPE_PILL: Record<FieldDataType, string> = {
   text: 'neutral',
@@ -47,7 +53,7 @@ export function FieldDictionary() {
       toast('The identity field cannot be deleted.', 'error');
       return;
     }
-    if (!confirm(`Remove the logical field "${f.canonical_name}" from the dictionary?`)) return;
+    if (!confirm(`Remove the field "${f.canonical_name}" from SheetSmart?`)) return;
     await api.del(`/dictionary/${f.id}`);
     toast('Field removed', 'success');
     reload();
@@ -58,34 +64,32 @@ export function FieldDictionary() {
 
   return (
     <>
-      <SectionHead title="Field Dictionary">
+      <SectionHead title="Fields">
         <button className="btn" onClick={() => setEditing('new')}>
           Add field
         </button>
       </SectionHead>
       <p className="reading-copy" style={{ marginTop: 0 }}>
-        The canonical list of logical fields SheetSmart reasons about. Each field knows its type, whether it&apos;s an
-        identity key or sensitive, whether it must be written as literal text, its default sync policy, and the real
-        headers (aliases) it has drifted into. This is where column drift stops being a recurring fire and becomes a
-        managed fact — add an alias whenever a captain sheet renames a column, and the tool learns it.
+        These are the field names SheetSmart uses when comparing and updating sheets. If a captain uses a different
+        column name, add that name here once and SheetSmart will recognize it in future scans.
       </p>
 
       <div className="card-grid" style={{ marginBottom: 24 }}>
         <div className="card">
           <div className="metric">{counts.total}</div>
-          <div className="metric-label">Logical fields</div>
+          <div className="metric-label">Fields defined</div>
         </div>
         <div className="card">
           <div className="metric">{counts.identity}</div>
-          <div className="metric-label">Identity key</div>
+          <div className="metric-label">Unique ID field</div>
         </div>
         <div className="card">
           <div className="metric">{counts.sensitive}</div>
-          <div className="metric-label">Sensitive fields</div>
+          <div className="metric-label">Private fields</div>
         </div>
         <div className="card">
           <div className="metric">{counts.textSafe}</div>
-          <div className="metric-label">Text-safe fields</div>
+          <div className="metric-label">Keep-as-text fields</div>
         </div>
       </div>
 
@@ -100,17 +104,18 @@ export function FieldDictionary() {
       </div>
 
       {filtered.length === 0 ? (
-        <EmptyState title="No fields match" body="Try a different search, or add a new logical field." />
+        <EmptyState title="No fields match" body="Try a different search, or add a new field." />
       ) : (
         <div className="table-wrap">
           <table className="data">
             <thead>
               <tr>
-                <th>Canonical field</th>
+                <th>Standard name</th>
                 <th>Type</th>
                 <th>Flags</th>
-                <th>Default policy</th>
-                <th>Aliases</th>
+                <th>Captain sheets</th>
+                <th>Update rule</th>
+                <th>Other column names</th>
                 <th />
               </tr>
             </thead>
@@ -125,13 +130,20 @@ export function FieldDictionary() {
                   </td>
                   <td>
                     <div className="fd-badges">
-                      {f.is_identity ? <span className="pill urgent">identity</span> : null}
-                      {f.is_sensitive ? <span className="pill error">sensitive</span> : null}
-                      {f.is_text_safe ? <span className="pill info">text-safe</span> : null}
+                      {f.is_identity ? <span className="pill urgent">Unique ID</span> : null}
+                      {f.is_sensitive ? <span className="pill error">Private info</span> : null}
+                      {f.is_text_safe ? <span className="pill info">Keep as text</span> : null}
                       {!f.is_identity && !f.is_sensitive && !f.is_text_safe ? (
                         <span className="card-meta">—</span>
                       ) : null}
                     </div>
+                  </td>
+                  <td>
+                    {f.distribute_to_captain ? (
+                      <span className="pill info">Included</span>
+                    ) : (
+                      <span className="pill neutral">Master only</span>
+                    )}
                   </td>
                   <td>
                     <PolicyPill policy={f.default_policy} />
@@ -197,6 +209,7 @@ function FieldForm({
     is_identity: Boolean(existing?.is_identity),
     is_sensitive: Boolean(existing?.is_sensitive),
     is_text_safe: Boolean(existing?.is_text_safe),
+    distribute_to_captain: existing ? Boolean(existing.distribute_to_captain) : true,
     notes: existing?.notes ?? '',
     aliasesText: (existing?.aliases ?? []).join(', '),
   });
@@ -212,6 +225,7 @@ function FieldForm({
       is_identity: form.is_identity,
       is_sensitive: form.is_sensitive,
       is_text_safe: form.is_text_safe,
+      distribute_to_captain: form.distribute_to_captain,
       notes: form.notes,
       aliases: form.aliasesText
         .split(',')
@@ -229,15 +243,15 @@ function FieldForm({
     }
   }
 
-  const toggle = (k: 'is_identity' | 'is_sensitive' | 'is_text_safe') => () =>
+  const toggle = (k: 'is_identity' | 'is_sensitive' | 'is_text_safe' | 'distribute_to_captain') => () =>
     setForm((f) => ({ ...f, [k]: !f[k] }));
 
   return (
-    <Modal title={existing ? `Edit field — ${existing.canonical_name}` : 'Add logical field'} onClose={onClose} wide>
+    <Modal title={existing ? `Edit field — ${existing.canonical_name}` : 'Add field'} onClose={onClose} wide>
       <form onSubmit={submit}>
         <div className="form-grid">
           <div className="field">
-            <label>Canonical name</label>
+            <label>Standard name</label>
             <input
               className="input mono"
               value={form.canonical_name}
@@ -271,43 +285,59 @@ function FieldForm({
           >
             {POLICIES.map((p) => (
               <option key={p} value={p}>
-                {p}
+                {POLICY_LABEL[p]}
               </option>
             ))}
           </select>
           {form.is_identity && (
-            <div className="hint">Identity fields are always forced to “never” — they can&apos;t be written by a workflow.</div>
+            <div className="hint">Unique ID fields are never overwritten by automated updates.</div>
           )}
+        </div>
+
+        <div className="field">
+          <label>Where this field belongs</label>
+          <label className="chip" style={{ cursor: 'pointer' }}>
+            <input
+              type="checkbox"
+              checked={form.distribute_to_captain}
+              onChange={toggle('distribute_to_captain')}
+            />{' '}
+            Include this field on captain sheets
+          </label>
+          <div className="hint">
+            Turn this off for master-only information. SheetSmart will not copy it to captains or report it as a
+            missing captain column.
+          </div>
         </div>
 
         <div className="field">
           <label>Protection flags</label>
           <div className="btn-row">
             <label className="chip" style={{ cursor: 'pointer' }}>
-              <input type="checkbox" checked={form.is_identity} onChange={toggle('is_identity')} /> Identity key
+              <input type="checkbox" checked={form.is_identity} onChange={toggle('is_identity')} /> Unique ID
             </label>
             <label className="chip" style={{ cursor: 'pointer' }}>
-              <input type="checkbox" checked={form.is_sensitive} onChange={toggle('is_sensitive')} /> Sensitive
+              <input type="checkbox" checked={form.is_sensitive} onChange={toggle('is_sensitive')} /> Private info
             </label>
             <label className="chip" style={{ cursor: 'pointer' }}>
-              <input type="checkbox" checked={form.is_text_safe} onChange={toggle('is_text_safe')} /> Text-safe
+              <input type="checkbox" checked={form.is_text_safe} onChange={toggle('is_text_safe')} /> Keep as text
             </label>
           </div>
           <div className="hint">
-            Sensitive fields are flagged (not blocked) when pushed to captain sheets. Text-safe fields are written as
-            literal text so IDs and zips aren&apos;t mangled.
+            Private fields get a warning before they are copied to captain sheets. Keep-as-text fields prevent IDs and
+            zip codes from turning into dates or numbers.
           </div>
         </div>
 
         <div className="field">
-          <label>Aliases (real headers this field drifts into)</label>
+          <label>Other column names captains use</label>
           <textarea
             className="input"
             value={form.aliasesText}
             onChange={(e) => setForm((f) => ({ ...f, aliasesText: e.target.value }))}
             placeholder="Comma-separated, e.g. resident id, residentid"
           />
-          <div className="hint">The canonical name is always matched automatically — only list extra variants here.</div>
+          <div className="hint">The standard name is always recognized. List only additional versions here.</div>
         </div>
 
         <div className="field">

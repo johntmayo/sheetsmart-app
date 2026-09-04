@@ -186,3 +186,34 @@ test('runAudit reports rows missing situs address fields', () => {
   assert.strictEqual(report.missingSitusRows[0].residentId, 'R2');
   assert.match(report.missingSitusRows[0].missingFields, /_SitusHouseNo/);
 });
+
+test('runAudit does not count intentionally master-only sales columns as drift', () => {
+  const captain = [
+    ['resident_id', 'ZoneName', 'Resident Name', 'House', 'Street', 'APN', 'Damage', 'Address'],
+    ['R1', 'Zone A', 'Ann', '10', 'Oak', 'APN1', 'Major', '10 Oak'],
+    ['R2', 'Zone A', 'Bob', '12', 'Oak', 'APN2', '', '12 Oak'],
+  ];
+  const report = runAudit(MASTER, [{ name: 'Zone A Captain', data: captain }], {
+    captainDistributedHeaders: MASTER[0]
+      .map(String)
+      .filter((header) => header !== 'Address - For Sale'),
+  });
+
+  assert.strictEqual(report.sheets[0].status, 'Match');
+  assert.deepStrictEqual(report.sheets[0].missingColumns, []);
+  assert.ok(!report.masterHeaders.includes('Address - For Sale'));
+});
+
+test('runAudit reports master-only fields that remain on captain sheets as extra', () => {
+  const captain = [
+    [...MASTER[0]],
+    [...MASTER[1]],
+  ];
+  const report = runAudit(MASTER, [{ name: 'Zone A Captain', data: captain }], {
+    captainDistributedHeaders: MASTER[0]
+      .map(String)
+      .filter((header) => header !== 'Address - For Sale'),
+  });
+  assert.strictEqual(report.sheets[0].status, 'Extra Columns');
+  assert.ok(report.sheets[0].extraColumns.includes('Address - For Sale'));
+});

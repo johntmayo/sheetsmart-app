@@ -336,6 +336,363 @@ export interface CaptainMovePlan {
   fingerprint: string;
 }
 
+export interface CaptainSheetInput {
+  spreadsheetId: string;
+  spreadsheetName: string;
+  tabName: string;
+  zone: string;
+  grid: Grid;
+}
+
+export interface AddressResidentMove {
+  residentId: string;
+  residentName: string;
+  sourcePresent: boolean;
+  destinationPresent: boolean;
+  sensitiveData: Array<{ field: string; value: string }>;
+  sourceRowHash: string;
+}
+
+export interface SensitiveFieldSpec {
+  canonicalName: string;
+  aliases?: string[];
+}
+
+export interface AddressMoveCandidate {
+  kind: 'move' | 'assign';
+  addressId: string;
+  displayAddress: string;
+  fromZone: string;
+  toZone: string;
+  fromSpreadsheetId: string;
+  fromSpreadsheetName: string;
+  fromTabName: string;
+  toSpreadsheetId: string;
+  toSpreadsheetName: string;
+  toTabName: string;
+  destinationFields: Record<string, string>;
+  residents: AddressResidentMove[];
+}
+
+export interface FolderZoneReconcilePlan {
+  moves: AddressMoveCandidate[];
+  blocked: Array<{ addressId: string; residentIds: string[]; reason: string }>;
+  registryErrors: string[];
+  unchangedAddresses: number;
+  unassignedAddresses: number;
+  fingerprint: string;
+}
+
+/**
+ * Plan Mapbox boundary moves for a whole captain folder.
+ *
+ * Geography is resolved once per address_id, while the eventual sheet writes
+ * remain resident_id based because the spreadsheets are flattened to one row
+ * per person. An address is never partially proposed: inconsistent coordinates,
+ * current zones, or captain-sheet membership block the whole household.
+ */
+export function planFolderZoneReconciliation(
+  masterGrid: Grid,
+  captainSheets: CaptainSheetInput[],
+  features: ZoneFeatureCollection,
+  cfg: ZoneReconcileConfig,
+  options: { sensitiveColumns?: string[]; sensitiveFields?: SensitiveFieldSpec[] } = {}
+): FolderZoneReconcilePlan {
+  const plan: FolderZoneReconcilePlan = {
+    moves: [],
+    blocked: [],
+    registryErrors: [],
+    unchangedAddresses: 0,
+    unassignedAddresses: 0,
+    fingerprint: '',
+  };
+  const headers = (masterGrid[0] || []).map((value) => s(value));
+  const residentIdx = headerIndex(headers, cfg.identityHeader || 'resident_id');
+  const addressIdx = headerIndex(headers, 'address_id');
+  const nameIdx = headerIndex(headers, cfg.nameHeader || 'Resident Name');
+  const latIdx = headerIndex(headers, cfg.latHeader);
+  const lonIdx = headerIndex(headers, cfg.lonHeader);
+  const zoneIdx = headerIndex(headers, cfg.zoneHeader || 'ZoneName');
+  const displayAddressIdx = headerIndex(headers, 'Address');
+  const houseIdx = headerIndex(headers, 'House');
+  const streetIdx = headerIndex(headers, 'Street');
+  if (residentIdx === -1 || addressIdx === -1 || latIdx === -1 || lonIdx === -1) {
+    plan.registryErrors.push('Master must contain resident_id, address_id, Latitude, and Longitude.');
+    return plan;
+  }
+
+  const sheetByZone = new Map<string, CaptainSheetInput>();
+  for (const sheet of captainSheets) {
+    const zone = sheet.zone.trim();
+    if (!zone) {
+      plan.registryErrors.push(`${sheet.spreadsheetName} has no detectable zone.`);
+      continue;
+    }
+    if (sheetByZone.has(zone)) {
+      plan.registryErrors.push(`More than one captain sheet maps to ${zone}.`);
+      continue;
+    }
+    sheetByZone.set(zone, sheet);
+  }
+  if (plan.registryErrors.length > 0) return plan;
+
+  const residentSheet = new Map<string, Array<{ sheet: CaptainSheetInput; rowIndex: number }>>();
+  for (const sheet of captainSheets) {
+    const sheetHeaders = (sheet.grid[0] || []).map((value) => s(value));
+    const sheetResidentIdx = headerIndex(sheetHeaders, cfg.identityHeader || 'resident_id');
+    if (sheetResidentIdx === -1) {
+      plan.registryErrors.push(`${sheet.spreadsheetName} has no resident_id column.`);
+      continue;
+    }
+    for (let rowIndex = 1; rowIndex < sheet.grid.length; rowIndex++) {
+      const residentId = s(sheet.grid[rowIndex]?.[sheetResidentIdx]);
+      if (!residentId) continue;
+      const locations = residentSheet.get(residentId) || [];
+      locations.push({ sheet, rowIndex });
+      residentSheet.set(residentId, locations);
+    }
+  }
+  if (plan.registryErrors.length > 0) return plan;
+
+  interface MasterAddressRow {
+    residentId: string;
+    residentName: string;
+    lat: number;
+    lon: number;
+    currentZone: string;
+    displayAddress: string;
+    masterRow: CellValue[];
+  }
+  const byAddress = new Map<string, MasterAddressRow[]>();
+  const masterAddressOccurrences = new Map<string, string[]>();
+  for (let rowIndex = 1; rowIndex < masterGrid.length; rowIndex++) {
+    const row = masterGrid[rowIndex] || [];
+    const residentId = s(row[residentIdx]);
+    const addressId = s(row[addressIdx]);
+    if (!residentId || !addressId) {
+      plan.blocked.push({
+        addressId,
+        residentIds: residentId ? [residentId] : [],
+        reason: !addressId ? 'Missing address_id' : 'Missing resident_id',
+      });
+      continue;
+    }
+    masterAddressOccurrences.set(residentId, [...(masterAddressOccurrences.get(residentId) || []), addressId]);
+    const rows = byAddress.get(addressId) || [];
+    rows.push({
+      residentId,
+      residentName: nameIdx === -1 ? '' : s(row[nameIdx]),
+      lat: toNumber(row[latIdx]),
+      lon: toNumber(row[lonIdx]),
+      currentZone: zoneIdx === -1 ? '' : s(row[zoneIdx]),
+      displayAddress:
+        displayAddressIdx !== -1
+          ? s(row[displayAddressIdx])
+          : [houseIdx === -1 ? '' : s(row[houseIdx]), streetIdx === -1 ? '' : s(row[streetIdx])]
+              .filter(Boolean)
+              .join(' '),
+      masterRow: row,
+    });
+    byAddress.set(addressId, rows);
+  }
+
+  const spatialIndex = buildSpatialIndex(features);
+  if (spatialIndex.length === 0) {
+    plan.registryErrors.push('No zone polygons were loaded.');
+    return plan;
+  }
+
+  for (const [addressId, rows] of byAddress) {
+    const residentIds = rows.map((row) => row.residentId);
+    const duplicateResident = residentIds.find(
+      (residentId) => (masterAddressOccurrences.get(residentId)?.length || 0) > 1
+    );
+    if (duplicateResident) {
+      plan.blocked.push({
+        addressId,
+        residentIds,
+        reason: `Resident ${duplicateResident} appears more than once on the master.`,
+      });
+      continue;
+    }
+    if (rows.some((row) => !Number.isFinite(row.lat) || !Number.isFinite(row.lon))) {
+      plan.blocked.push({ addressId, residentIds, reason: 'One or more residents at this address have missing coordinates.' });
+      continue;
+    }
+
+    // Source rows can carry slightly different geocodes for the same address.
+    // What matters is whether every point resolves to the same polygon, not
+    // whether the floating-point values are byte-identical.
+    const rowMatches = rows.map((row) => findContainingFeatures(spatialIndex, [row.lon, row.lat]));
+    if (rowMatches.every((matches) => matches.length === 0)) {
+      plan.unassignedAddresses++;
+      continue;
+    }
+    if (rowMatches.some((matches) => matches.length === 0)) {
+      plan.blocked.push({ addressId, residentIds, reason: 'Only some residents at this address fall inside a Mapbox zone.' });
+      continue;
+    }
+    if (rowMatches.some((matches) => matches.length > 1)) {
+      plan.blocked.push({ addressId, residentIds, reason: 'Address falls inside more than one Mapbox zone.' });
+      continue;
+    }
+    const computedZones = new Set(rowMatches.map((matches) => featureProp(matches[0], 'ZoneName')));
+    if (computedZones.size !== 1 || computedZones.has('')) {
+      plan.blocked.push({ addressId, residentIds, reason: 'Residents at this address resolve to different Mapbox zones.' });
+      continue;
+    }
+    const matchedFeature = rowMatches[0][0];
+    const toZone = [...computedZones][0];
+
+    const masterZones = new Set(rows.map((row) => row.currentZone).filter(Boolean));
+    if (masterZones.size > 1) {
+      plan.blocked.push({ addressId, residentIds, reason: 'Residents at this address have inconsistent master ZoneName values.' });
+      continue;
+    }
+    const currentZones = new Set<string>();
+    for (const row of rows) {
+      for (const location of residentSheet.get(row.residentId) || []) currentZones.add(location.sheet.zone);
+    }
+    if (currentZones.size > 1) {
+      plan.blocked.push({
+        addressId,
+        residentIds,
+        reason: 'Residents at this address do not share one current captain-sheet zone.',
+      });
+      continue;
+    }
+    const fromZone = [...currentZones][0] || '';
+    if (fromZone === toZone) {
+      plan.unchangedAddresses++;
+      continue;
+    }
+    const fromSheet = fromZone ? sheetByZone.get(fromZone) : undefined;
+    const toSheet = sheetByZone.get(toZone);
+    if ((fromZone && !fromSheet) || !toSheet) {
+      plan.blocked.push({
+        addressId,
+        residentIds,
+        reason: fromZone && !fromSheet
+          ? `No captain sheet is mapped to current zone ${fromZone}.`
+          : `No captain sheet is mapped to computed zone ${toZone}.`,
+      });
+      continue;
+    }
+
+    const residents: AddressResidentMove[] = [];
+    let membershipProblem = '';
+    for (const row of rows) {
+      const locations = residentSheet.get(row.residentId) || [];
+      if (locations.length > 1) {
+        membershipProblem = `Resident ${row.residentId} appears on multiple captain sheets.`;
+        break;
+      }
+      if (fromZone && locations.length === 0) {
+        membershipProblem = `Resident ${row.residentId} is not present on the expected source captain sheet.`;
+        break;
+      }
+      if (
+        fromZone &&
+        fromSheet &&
+        locations.length === 1 &&
+        locations[0].sheet.spreadsheetId !== fromSheet.spreadsheetId
+      ) {
+        membershipProblem = `Resident ${row.residentId} is on ${locations[0].sheet.spreadsheetName}, not the expected source sheet.`;
+        break;
+      }
+      const privacySource =
+        locations.length === 1
+          ? {
+              headers: (locations[0].sheet.grid[0] || []).map((value) => s(value)),
+              row: locations[0].sheet.grid[locations[0].rowIndex] || [],
+            }
+          : { headers, row: row.masterRow };
+      residents.push({
+        residentId: row.residentId,
+        residentName: row.residentName,
+        sourcePresent: Boolean(
+          fromSheet && locations.some((location) => location.sheet.spreadsheetId === fromSheet.spreadsheetId)
+        ),
+        destinationPresent: locations.some((location) => location.sheet.spreadsheetId === toSheet.spreadsheetId),
+        sensitiveData: (
+          options.sensitiveFields ||
+          (options.sensitiveColumns || []).map((field) => ({ canonicalName: field, aliases: [] }))
+        ).flatMap((field) => {
+          const accepted = new Set([field.canonicalName, ...(field.aliases || [])].map(normalizeKey));
+          const values = privacySource.headers.flatMap((header, index) => {
+            const value = accepted.has(normalizeKey(header)) ? s(privacySource.row[index]) : '';
+            return value ? [value] : [];
+          });
+          return [...new Set(values)].map((value) => ({ field: field.canonicalName, value }));
+        }),
+        sourceRowHash: createHash('sha256')
+          .update(JSON.stringify(privacySource.row.map((value) => String(value ?? ''))))
+          .digest('hex'),
+      });
+    }
+    if (membershipProblem) {
+      plan.blocked.push({ addressId, residentIds, reason: membershipProblem });
+      continue;
+    }
+
+    plan.moves.push({
+      kind: fromZone ? 'move' : 'assign',
+      addressId,
+      displayAddress: rows.find((row) => row.displayAddress)?.displayAddress || '',
+      fromZone,
+      toZone,
+      fromSpreadsheetId: fromSheet?.spreadsheetId || '',
+      fromSpreadsheetName: fromSheet?.spreadsheetName || '',
+      fromTabName: fromSheet?.tabName || '',
+      toSpreadsheetId: toSheet.spreadsheetId,
+      toSpreadsheetName: toSheet.spreadsheetName,
+      toTabName: toSheet.tabName,
+      destinationFields: destinationFieldsFromFeature(matchedFeature, toZone),
+      residents,
+    });
+  }
+
+  plan.moves.sort((a, b) =>
+    `${a.fromZone}\u0000${a.toZone}\u0000${a.addressId}`.localeCompare(
+      `${b.fromZone}\u0000${b.toZone}\u0000${b.addressId}`
+    )
+  );
+  plan.fingerprint = fingerprintFolderZoneMoves(plan.moves);
+  return plan;
+}
+
+export function fingerprintFolderZoneMoves(moves: AddressMoveCandidate[]): string {
+  const lines = moves.map((move) => {
+    const residents = move.residents
+      .map(
+        (resident) =>
+          `${resident.residentId}:${resident.sourceRowHash}:${resident.sensitiveData
+            .map((item) => `${item.field}=${item.value}`)
+            .sort()
+            .join('|')}`
+      )
+      .sort()
+      .join(',');
+    const destinationFields = Object.entries(move.destinationFields)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([field, value]) => `${field}=${value}`)
+      .join('|');
+    return [
+      move.kind,
+      move.addressId,
+      move.fromZone,
+      move.toZone,
+      move.fromSpreadsheetId,
+      move.fromTabName,
+      move.toSpreadsheetId,
+      move.toTabName,
+      destinationFields,
+      residents,
+    ].join('\t');
+  });
+  return createHash('sha256').update(lines.sort().join('\n')).digest('hex');
+}
+
 /**
  * Propose identity-based moves of residents who currently sit on the source
  * captain sheet but whose Mapbox-computed zone matches the destination sheet's

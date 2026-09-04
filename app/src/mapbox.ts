@@ -42,7 +42,7 @@ async function withRetry<T>(fn: () => Promise<T>, attempts = 3, baseDelayMs = 60
 export async function fetchZoneFeatures(source: ZoneSourceConfig): Promise<ZoneFeatureCollection> {
   if (!isMapboxConfigured()) {
     throw new Error(
-      'Mapbox is not configured. Add MAPBOX_TOKEN (a token with the datasets:read scope) to your .env, then restart.'
+      'Mapbox is not connected. Zone checks need access to the Mapbox zone dataset.'
     );
   }
   const username = (source.username || '').trim();

@@ -90,6 +90,8 @@ export interface PushMissingResult {
 
 export interface PushMissingOptions {
   sensitiveColumns?: string[];
+  /** Target headers allowed to receive master values. Omit for generic legacy behavior. */
+  distributedColumns?: string[];
 }
 
 export function trimHeaders(row: CellValue[] | undefined): string[] {
@@ -236,6 +238,9 @@ export function planPushMissingResidents(
   options: PushMissingOptions = {}
 ): PushMissingResult {
   const sensitiveColumns = options.sensitiveColumns || [];
+  const distributedColumns = options.distributedColumns
+    ? new Set(options.distributedColumns.map((column) => String(column).trim()))
+    : null;
   const result: PushMissingResult = {
     appended: [],
     flagged: [],
@@ -299,7 +304,11 @@ export function planPushMissingResidents(
       result.skipped.push({ residentId: masterId, residentName: name, masterRow: mr + 1, reason: 'resident_id already present' });
       continue;
     }
-    const newRow = targetHeaders.map((_h, c) => (colMap[c] === -1 ? '' : masterRow[colMap[c]]));
+    const newRow = targetHeaders.map((header, c) =>
+      colMap[c] === -1 || (distributedColumns && !distributedColumns.has(header))
+        ? ''
+        : masterRow[colMap[c]]
+    );
     const flaggedCols: string[] = [];
     sensitiveMasterCols.forEach((sc, i) => {
       const sv = masterRow[sc];

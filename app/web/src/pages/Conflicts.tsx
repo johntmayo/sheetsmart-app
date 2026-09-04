@@ -76,9 +76,9 @@ export function Conflicts() {
     <>
       <SectionHead title="Conflict inbox" />
       <p className="reading-copy" style={{ marginTop: 0 }}>
-        Conflicts are disagreements between a source and a target value where the policy did not allow an overwrite.
-        SheetSmart logs them instead of overwriting, so a human decides. Applying a captain value writes it to the
-        master copy as its own recorded run, which you can undo from Runs.
+        The master and a captain sheet disagree, and SheetSmart did not know which value to keep automatically.
+        Accepting a captain&apos;s value updates the selected master sheet as a recorded run that you can undo from Runs.
+        Dismissing an item makes no sheet changes.
       </p>
       {actionError && <ErrorState message={actionError} />}
       {queued && (
@@ -94,7 +94,7 @@ export function Conflicts() {
           {applicable.length > 0 && (
             <div className="btn-row" style={{ marginBottom: 12 }}>
               <button className="btn highlight" onClick={applySelected} disabled={selectedCount === 0 || applying}>
-                {applying ? 'Starting safely…' : `Use captain value for ${selectedCount} selected`}
+                {applying ? 'Starting safely…' : `Accept captain’s value for ${selectedCount} selected`}
               </button>
             </div>
           )}
@@ -136,7 +136,7 @@ export function Conflicts() {
                       <td className="truncate">{c.incoming_value}</td>
                       <td>
                         <button className="btn secondary small" onClick={() => resolve(c.id)}>
-                          Mark resolved
+                          Dismiss (no sheet change)
                         </button>
                       </td>
                     </tr>

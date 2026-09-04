@@ -448,6 +448,217 @@ export function newResidentCellKeys(candidates: NewResidentCandidate[]): PullCel
   }));
 }
 
+// ---- Folder-wide captain-created residents, grouped by address ----
+
+export interface CaptainPullSheet {
+  spreadsheetId: string;
+  spreadsheetName: string;
+  tabName: string;
+  zone: string;
+  grid: Grid;
+}
+
+export interface FolderNewResident extends NewResidentCandidate {
+  addressId: string;
+  sourceSpreadsheetId: string;
+  sourceSpreadsheetName: string;
+  sourceTabName: string;
+  sourceZone: string;
+}
+
+export interface FolderNewAddress {
+  addressId: string;
+  displayAddress: string;
+  kind: 'new_address' | 'existing_address';
+  sourceSpreadsheetId: string;
+  sourceSpreadsheetName: string;
+  sourceTabName: string;
+  sourceZone: string;
+  residents: FolderNewResident[];
+  risk: DuplicateRisk;
+}
+
+export interface FolderPullBlock {
+  addressId: string;
+  residentIds: string[];
+  reason: string;
+}
+
+export interface FolderNewResidentsPlan {
+  addresses: FolderNewAddress[];
+  blocked: FolderPullBlock[];
+  skipped: Array<PullSkip & { spreadsheetName: string }>;
+  columnsOnlyOnCaptains: string[];
+  errors: string[];
+  fingerprint: string;
+}
+
+/**
+ * Find captain-created residents across a whole folder and make address_id the
+ * approval boundary. Ambiguous identities, missing address IDs, and households
+ * split across captain sheets are blocked instead of guessed.
+ */
+export function planPullNewResidentsFromFolder(
+  masterGrid: Grid,
+  captainSheets: CaptainPullSheet[],
+  options: NewResidentsOptions & { addressColumn?: string } = {}
+): FolderNewResidentsPlan {
+  const identityColumn = options.identityColumn || 'resident_id';
+  const addressColumn = options.addressColumn || 'address_id';
+  const masterHeaders = trimHeaders(masterGrid[0]);
+  const masterIdCol = masterHeaders.indexOf(identityColumn);
+  const masterAddressCol = masterHeaders.indexOf(addressColumn);
+  const plan: FolderNewResidentsPlan = {
+    addresses: [],
+    blocked: [],
+    skipped: [],
+    columnsOnlyOnCaptains: [],
+    errors: [],
+    fingerprint: folderNewResidentsFingerprint([]),
+  };
+  if (masterIdCol === -1) plan.errors.push(`The master has no ${identityColumn} column.`);
+  if (masterAddressCol === -1) plan.errors.push(`The master has no ${addressColumn} column.`);
+  if (plan.errors.length > 0) return plan;
+
+  const masterAddressIds = new Set(
+    masterGrid.slice(1).map((row) => identity(row?.[masterAddressCol])).filter(Boolean)
+  );
+  const candidates: FolderNewResident[] = [];
+  const occurrences = new Map<string, Array<{ addressId: string; spreadsheetId: string }>>();
+  const droppedColumns = new Set<string>();
+
+  for (const sheet of captainSheets) {
+    const headers = trimHeaders(sheet.grid[0]);
+    const idCol = headers.indexOf(identityColumn);
+    const addressCol = headers.indexOf(addressColumn);
+    if (idCol === -1) {
+      plan.errors.push(`${sheet.spreadsheetName} has no ${identityColumn} column.`);
+      continue;
+    }
+    if (addressCol === -1) {
+      plan.errors.push(`${sheet.spreadsheetName} has no ${addressColumn} column.`);
+      continue;
+    }
+
+    for (let rowIndex = 1; rowIndex < sheet.grid.length; rowIndex++) {
+      const row = sheet.grid[rowIndex] || [];
+      const residentId = identity(row[idCol]);
+      if (!residentId) continue;
+      const list = occurrences.get(residentId) || [];
+      list.push({ addressId: identity(row[addressCol]), spreadsheetId: sheet.spreadsheetId });
+      occurrences.set(residentId, list);
+    }
+
+    const sheetPlan = planPullNewResidents(masterGrid, sheet.grid, options);
+    sheetPlan.columnsOnlyOnCaptain.forEach((column) => droppedColumns.add(column));
+    plan.skipped.push(
+      ...sheetPlan.skipped.map((skip) => ({ ...skip, spreadsheetName: sheet.spreadsheetName }))
+    );
+    for (const candidate of sheetPlan.candidates) {
+      const sourceRow = sheet.grid[candidate.captainRow - 1] || [];
+      candidates.push({
+        ...candidate,
+        addressId: identity(sourceRow[addressCol]),
+        sourceSpreadsheetId: sheet.spreadsheetId,
+        sourceSpreadsheetName: sheet.spreadsheetName,
+        sourceTabName: sheet.tabName,
+        sourceZone: sheet.zone,
+      });
+    }
+  }
+  plan.columnsOnlyOnCaptains = [...droppedColumns].sort();
+
+  // Add cross-folder person duplicate warnings. A shared address is expected;
+  // the same person key or email under another new resident_id is not.
+  const nameCol = masterHeaders.indexOf(options.nameColumn || 'Resident Name');
+  const emailCol = masterHeaders.indexOf(options.emailColumn || 'Email');
+  const seenNameAtAddress = new Map<string, string>();
+  const seenEmail = new Map<string, string>();
+  for (const candidate of candidates) {
+    const name = nameCol === -1 ? '' : normalizeKey(candidate.row[nameCol]);
+    const email = emailCol === -1 ? '' : normalizeKey(candidate.row[emailCol]);
+    const personAtAddress = name && candidate.addressId ? `${name}|${normalizeKey(candidate.addressId)}` : '';
+    const matched =
+      (personAtAddress && seenNameAtAddress.get(personAtAddress)) || (email && seenEmail.get(email)) || '';
+    if (matched && candidate.risk === 'none') {
+      candidate.risk = 'likely';
+      candidate.matchedResidentId = matched;
+      candidate.riskReason = 'Another captain-created row appears to be this same person.';
+    }
+    if (personAtAddress && !seenNameAtAddress.has(personAtAddress)) {
+      seenNameAtAddress.set(personAtAddress, candidate.residentId);
+    }
+    if (email && !seenEmail.has(email)) seenEmail.set(email, candidate.residentId);
+  }
+
+  const byAddress = new Map<string, FolderNewResident[]>();
+  for (const candidate of candidates) {
+    const key = candidate.addressId || `__missing__:${candidate.sourceSpreadsheetId}:${candidate.residentId}`;
+    const group = byAddress.get(key) || [];
+    group.push(candidate);
+    byAddress.set(key, group);
+  }
+
+  for (const residents of byAddress.values()) {
+    const addressId = residents[0].addressId;
+    const residentIds = residents.map((resident) => resident.residentId);
+    const duplicateIdentity = residents.find(
+      (resident) => (occurrences.get(resident.residentId)?.length || 0) > 1
+    );
+    const sourceIds = new Set(residents.map((resident) => resident.sourceSpreadsheetId));
+    let reason = '';
+    if (!addressId) reason = `A captain-created resident has no ${addressColumn}.`;
+    else if (duplicateIdentity) {
+      reason = `Resident ${duplicateIdentity.residentId} appears more than once in the captain folder.`;
+    } else if (sourceIds.size > 1) {
+      reason = 'Residents at this address appear on more than one captain sheet.';
+    } else if (residents.some((resident) => resident.missingRequired.length > 0)) {
+      reason = 'At least one resident is missing a required field.';
+    }
+    if (reason) {
+      plan.blocked.push({ addressId, residentIds, reason });
+      continue;
+    }
+
+    const first = residents[0];
+    plan.addresses.push({
+      addressId,
+      displayAddress: first.property,
+      kind: masterAddressIds.has(addressId) ? 'existing_address' : 'new_address',
+      sourceSpreadsheetId: first.sourceSpreadsheetId,
+      sourceSpreadsheetName: first.sourceSpreadsheetName,
+      sourceTabName: first.sourceTabName,
+      sourceZone: first.sourceZone,
+      residents,
+      risk: residents.some((resident) => resident.risk === 'likely')
+        ? 'likely'
+        : residents.some((resident) => resident.risk === 'possible')
+          ? 'possible'
+          : 'none',
+    });
+  }
+
+  plan.addresses.sort((a, b) => a.displayAddress.localeCompare(b.displayAddress) || a.addressId.localeCompare(b.addressId));
+  plan.fingerprint = folderNewResidentsFingerprint(plan.addresses);
+  return plan;
+}
+
+export function folderNewResidentsFingerprint(addresses: FolderNewAddress[]): string {
+  const lines = addresses
+    .flatMap((address) =>
+      address.residents.map(
+        (resident) =>
+          `${address.addressId}\t${address.kind}\t${address.risk}\t${resident.sourceSpreadsheetId}\t${
+            resident.residentId
+          }\t${resident.risk}\t${resident.matchedResidentId}\t${resident.row
+            .map((cell) => pullCellValueKey(cell))
+            .join('\u0001')}`
+      )
+    )
+    .sort();
+  return createHash('sha256').update(lines.join('\n')).digest('hex');
+}
+
 function remapToMasterHeaders(
   cells: CellValue[],
   captainHeaders: string[],

@@ -10,10 +10,10 @@ import {
 import { buildSourceLookup, planCellFill, planPushMissingResidents } from '../src/lib/mergeEngine';
 
 const DICT: DictField[] = [
-  { canonical_name: 'resident_id', is_identity: 1, is_sensitive: 0, default_policy: 'never', aliases: ['resident id'] },
-  { canonical_name: 'Cell', is_identity: 0, is_sensitive: 1, default_policy: 'fill_blank', aliases: ['mobile'] },
-  { canonical_name: 'Damage', is_identity: 0, is_sensitive: 0, default_policy: 'fill_blank', aliases: [] },
-  { canonical_name: 'Build Status', is_identity: 0, is_sensitive: 0, default_policy: 'overwrite', aliases: [] },
+  { canonical_name: 'resident_id', is_identity: 1, is_sensitive: 0, distribute_to_captain: 1, default_policy: 'never', aliases: ['resident id'] },
+  { canonical_name: 'Cell', is_identity: 0, is_sensitive: 1, distribute_to_captain: 1, default_policy: 'fill_blank', aliases: ['mobile'] },
+  { canonical_name: 'Damage', is_identity: 0, is_sensitive: 0, distribute_to_captain: 1, default_policy: 'fill_blank', aliases: [] },
+  { canonical_name: 'Build Status', is_identity: 0, is_sensitive: 0, distribute_to_captain: 1, default_policy: 'overwrite', aliases: [] },
 ];
 
 test('resolveFieldHeader matches canonical name or an alias, drift-tolerant', () => {
