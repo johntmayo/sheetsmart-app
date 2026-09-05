@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { api, ApiError } from '../lib/api';
 import type { FolderCleanupPreviewResponse, QueuedRunResponse } from '../lib/types';
 import { ErrorState, Modal } from './ui';
@@ -11,6 +11,12 @@ export function FolderCleanupPlaybook() {
   const [queued, setQueued] = useState<QueuedRunResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const blockedSheets = preview?.sheets.filter((sheet) => sheet.blocks.length > 0) || [];
+
+  useEffect(() => {
+    void api.get<FolderCleanupPreviewResponse>('/folder-cleanup/latest-preview')
+      .then(setPreview)
+      .catch(() => undefined);
+  }, []);
 
   async function scan() {
     setPreviewing(true);

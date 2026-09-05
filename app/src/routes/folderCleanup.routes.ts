@@ -25,6 +25,18 @@ interface StoredCleanupPreview {
 }
 
 export default function registerFolderCleanupRoutes(api: Router, { db }: Deps): void {
+  api.get('/folder-cleanup/latest-preview', (_req: Request, res: Response) => {
+    const latest = db.get<{ id: number; summary_json: string }>(
+      `SELECT id, summary_json
+       FROM runs
+       WHERE type='preview_folder_wide_cleanup' AND mode='dry' AND status='succeeded'
+       ORDER BY id DESC
+       LIMIT 1`
+    );
+    if (!latest) return res.status(404).json({ error: 'No completed cleanup preview is available yet.' });
+    return res.json({ runId: latest.id, ...JSON.parse(latest.summary_json) });
+  });
+
   api.post('/folder-cleanup/preview', async (_req: Request, res: Response) => {
     if (!google.isConfigured()) return res.status(400).json({ error: 'Google is not configured.' });
     const master = db.get<ConnectionRow>("SELECT * FROM connections WHERE type='master' ORDER BY id LIMIT 1");
