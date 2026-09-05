@@ -88,7 +88,7 @@ test('blocks formula, date-coerced, numeric, and ambiguous master unit authority
   ]);
   const plan = planFolderCleanup(master, [captain]);
   assert.strictEqual(plan.canApply, false);
-  assert.ok(plan.sheets.flatMap((item) => item.blocks).some((block) => /ambiguous/.test(block.message)));
+  assert.ok(plan.sheets.flatMap((item) => item.blocks).some((block) => /different/.test(block.message)));
   assert.ok(plan.sheets.flatMap((item) => item.blocks).some((block) => /date\/time/.test(block.message)));
   assert.ok(plan.sheets.flatMap((item) => item.blocks).some((block) => /formula/i.test(block.message)));
 });

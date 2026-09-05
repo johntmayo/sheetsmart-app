@@ -215,6 +215,7 @@ function planSheet(
     if (addressIndex < 0 || duplicates.includes('address_id')) {
       blocks.push({ code: 'missing_address_id', message: '_SitusUnit cannot be audited without one exact address_id column.' });
     } else {
+      const reportedBlockedAddresses = new Set<string>();
       for (let r = 1; r < sheet.cells.length; r++) {
         if (!eligibleRow(sheet.cells[r])) continue;
         const addressId = cellText(sheet.cells[r]?.[addressIndex]);
@@ -228,7 +229,10 @@ function planSheet(
           continue;
         }
         if (masterUnit.blocked) {
-          blocks.push({ code: 'unit_authority_blocked', message: masterUnit.blocked, row: r + 1, column: '_SitusUnit' });
+          if (!reportedBlockedAddresses.has(addressId)) {
+            blocks.push({ code: 'unit_authority_blocked', message: masterUnit.blocked, row: r + 1, column: '_SitusUnit' });
+            reportedBlockedAddresses.add(addressId);
+          }
           continue;
         }
         const before = sheet.cells[r]?.[unitIndex] || {};
@@ -298,11 +302,11 @@ function buildUnitAuthority(master: CleanupSheet): Map<string, UnitAuthority> {
     const value = unitText(cell);
     const prior = result.get(addressId);
     if (issue) {
-      result.set(addressId, { value, blocked: `Master _SitusUnit is unsafe for address_id at master row ${r + 1}: ${issue}` });
+      result.set(addressId, { value, blocked: `Master _SitusUnit is unsafe for address_id ${addressId} at master row ${r + 1}: ${issue}` });
     } else if (prior && (prior.blocked || prior.value !== value)) {
       result.set(addressId, {
         value,
-        blocked: `Master has ambiguous _SitusUnit values for one address_id (including row ${r + 1}).`,
+        blocked: `Master has different _SitusUnit values for address_id ${addressId} (including master row ${r + 1}).`,
       });
     } else {
       result.set(addressId, { value });

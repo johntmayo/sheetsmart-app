@@ -10,6 +10,7 @@ export function FolderCleanupPlaybook() {
   const [applying, setApplying] = useState(false);
   const [queued, setQueued] = useState<QueuedRunResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const blockedSheets = preview?.sheets.filter((sheet) => sheet.blocks.length > 0) || [];
 
   async function scan() {
     setPreviewing(true);
@@ -76,6 +77,36 @@ export function FolderCleanupPlaybook() {
             <Metric value={preview.totals.blocks + preview.readErrors.length} label="Blocking issues" alert />
           </div>
 
+          {blockedSheets.length > 0 && (
+            <section className="card" style={{ marginTop: 18, background: 'var(--floral-white-warm)' }}>
+              <h3 style={{ marginTop: 0 }}>What needs attention</h3>
+              <p className="reading-copy">
+                Cleanup has not changed anything. Open each spreadsheet below to see exactly why it was stopped.
+              </p>
+              {blockedSheets.map((sheet) => (
+                <details
+                  key={`issues-${sheet.role}-${sheet.spreadsheetName}`}
+                  style={{ borderTop: '1px solid var(--border-color)', padding: '12px 0' }}
+                >
+                  <summary style={{ cursor: 'pointer', fontWeight: 700 }}>
+                    {sheet.spreadsheetName} — {sheet.blocks.length} {sheet.blocks.length === 1 ? 'issue' : 'issues'}
+                  </summary>
+                  <div style={{ padding: '8px 0 0 22px', maxWidth: 820 }}>
+                    {sheet.blocks.map((block, index) => (
+                      <div key={`${block.code}-${block.row || 0}-${index}`} style={{ marginBottom: 14 }}>
+                        <strong>{issueLabel(block.code, block.message)}</strong>
+                        <div className="reading-copy" style={{ marginTop: 2 }}>
+                          {block.message}
+                          {block.row ? ` Check row ${block.row}${block.column ? `, column ${block.column}` : ''}.` : ''}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </details>
+              ))}
+            </section>
+          )}
+
           <div className="table-wrap" style={{ marginTop: 16 }}>
             <table className="data">
               <thead>
@@ -101,27 +132,11 @@ export function FolderCleanupPlaybook() {
                     <td>{sheet.formatUnitAsText ? 'Set full column to text' : 'Column not present'}</td>
                     <td>
                       {sheet.blocks.length === 0 ? (
-                        sheet.cellChanges.length > 0 ? (
-                          <details>
-                            <summary style={{ cursor: 'pointer' }}><span className="card-meta">Ready · exact cells</span></summary>
-                            {sheet.cellChanges.map((change) => (
-                              <div className="card-meta" key={`${change.row}-${change.column}`}>
-                                Row {change.row}, {change.column}: {change.action}
-                              </div>
-                            ))}
-                          </details>
-                        ) : <span className="card-meta">Ready</span>
+                        <span className="card-meta">Ready</span>
                       ) : (
-                        <details>
-                          <summary style={{ cursor: 'pointer' }}><strong>{sheet.blocks.length} block(s)</strong></summary>
-                          {sheet.blocks.map((block, index) => (
-                            <div className="card-meta" key={`${block.code}-${block.row || 0}-${index}`}>
-                              {block.column ? `${block.column}: ` : ''}
-                              {block.message}
-                              {block.row ? ` (row ${block.row})` : ''}
-                            </div>
-                          ))}
-                        </details>
+                        <strong style={{ color: 'var(--rosy-copper)' }}>
+                          Stopped — see issues above
+                        </strong>
                       )}
                     </td>
                   </tr>
@@ -169,6 +184,16 @@ export function FolderCleanupPlaybook() {
       )}
     </div>
   );
+}
+
+function issueLabel(code: string, message: string): string {
+  if (code === 'structural_dependency' && /formula/i.test(message)) return 'Formula may depend on a removed column';
+  if (code === 'unit_authority_blocked') return 'Master contains conflicting unit values';
+  if (code === 'unsafe_master_unit') return 'Unit value may have been converted by Google Sheets';
+  if (code === 'invalid_boolean') return 'Boolean field contains an unexpected value';
+  if (code === 'blank_canonical_address') return 'Canonical address information is missing';
+  if (code === 'unit_authority_missing') return 'Address is missing from the master unit audit';
+  return 'Safety check stopped this spreadsheet';
 }
 
 function Metric({ value, label, alert }: { value: number; label: string; alert?: boolean }) {
