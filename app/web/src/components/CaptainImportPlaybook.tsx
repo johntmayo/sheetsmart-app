@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { api, ApiError } from '../lib/api';
 import type { CaptainImportPreviewResponse, QueuedRunResponse } from '../lib/types';
 import { ErrorState, Modal } from './ui';
@@ -12,6 +12,19 @@ export function CaptainImportPlaybook() {
   const [queued, setQueued] = useState<QueuedRunResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  function showPreview(result: CaptainImportPreviewResponse) {
+    setPreview(result);
+    setSelected(
+      new Set(result.addresses.filter((address) => address.risk === 'none').map((address) => address.addressId))
+    );
+  }
+
+  useEffect(() => {
+    void api.get<CaptainImportPreviewResponse>('/captain-import/latest-preview')
+      .then(showPreview)
+      .catch(() => undefined);
+  }, []);
+
   async function scan() {
     setPreviewing(true);
     setPreview(null);
@@ -21,10 +34,7 @@ export function CaptainImportPlaybook() {
     setError(null);
     try {
       const result = await api.post<CaptainImportPreviewResponse>('/captain-import/preview');
-      setPreview(result);
-      setSelected(
-        new Set(result.addresses.filter((address) => address.risk === 'none').map((address) => address.addressId))
-      );
+      showPreview(result);
     } catch (reason) {
       setError(reason instanceof ApiError ? reason.message : String(reason));
     } finally {
@@ -64,6 +74,16 @@ export function CaptainImportPlaybook() {
       .reduce((sum, address) => sum + address.residents.length, 0) || 0;
   const selectedWarnings =
     preview?.addresses.filter((address) => selected.has(address.addressId) && address.risk !== 'none').length || 0;
+  const safeAddresses = preview?.impact.safeAddresses ??
+    preview?.addresses.filter((address) => address.risk === 'none').length ?? 0;
+  const safeResidents = preview?.impact.safeResidents ??
+    preview?.addresses
+      .filter((address) => address.risk === 'none')
+      .reduce((sum, address) => sum + address.residents.length, 0) ?? 0;
+  const warnedResidents = preview?.impact.warnedResidents ??
+    preview?.addresses
+      .filter((address) => address.risk !== 'none')
+      .reduce((sum, address) => sum + address.residents.length, 0) ?? 0;
 
   return (
     <div className="card" style={{ borderColor: 'var(--golden-orange)', marginTop: 20 }}>
@@ -82,17 +102,24 @@ export function CaptainImportPlaybook() {
         <Modal title="Review captain-added residents" onClose={() => setPreview(null)} wide>
           <div className="callout">
             <strong>
-              Found {preview.impact.residents} resident(s) at {preview.impact.addresses} address(es) that are missing
-              from the master.
+              Currently selected: {selectedResidents} resident(s) at {selected.size} address(es).
             </strong>
             <div style={{ marginTop: 6 }}>
-              Addresses with no warnings are pre-selected. You must explicitly select possible duplicates.
+              {safeResidents} residents at {safeAddresses} addresses have no duplicate warnings and are selected by
+              default. {warnedResidents} residents at {preview.impact.warnedAddresses} addresses need duplicate review
+              and are not selected. {preview.impact.blockedAddresses} addresses cannot be imported until their data is fixed.
+            </div>
+            <div style={{ marginTop: 6 }}>
+              Overall, the scan found {preview.impact.residents} residents at {preview.impact.addresses} reviewable
+              addresses: {preview.impact.newAddresses} new addresses and {preview.impact.existingAddresses} existing
+              master addresses.
             </div>
           </div>
           <div className="card-grid" style={{ marginTop: 16 }}>
-            <Metric value={preview.impact.newAddresses} label="New addresses" />
-            <Metric value={preview.impact.existingAddresses} label="New people at addresses already on master" />
-            <Metric value={preview.impact.residents} label="Residents found" />
+            <Metric value={selected.size} label="Addresses currently selected" />
+            <Metric value={selectedResidents} label="Residents currently selected" />
+            <Metric value={preview.impact.warnedAddresses} label="Addresses needing duplicate review" alert />
+            <Metric value={warnedResidents} label="Residents needing duplicate review" alert />
             <Metric value={preview.impact.blockedAddresses} label="Addresses blocked (fix data first)" alert />
           </div>
 
@@ -113,7 +140,7 @@ export function CaptainImportPlaybook() {
                   onClick={() => setSelected(new Set(preview.addresses.slice(0, 500).map((address) => address.addressId)))}
                   disabled={Boolean(queued)}
                 >
-                  Select all, including warnings
+                  Add all warned addresses to selection
                 </button>
                 <button className="btn secondary small" onClick={() => setSelected(new Set())} disabled={Boolean(queued)}>
                   Clear selection

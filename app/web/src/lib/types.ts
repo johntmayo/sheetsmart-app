@@ -574,7 +574,10 @@ export interface CaptainImportPreviewResponse {
     newAddresses: number;
     existingAddresses: number;
     residents: number;
+    safeAddresses?: number;
+    safeResidents?: number;
     warnedAddresses: number;
+    warnedResidents?: number;
     blockedAddresses: number;
     sheetsScanned: number;
     readErrors: number;

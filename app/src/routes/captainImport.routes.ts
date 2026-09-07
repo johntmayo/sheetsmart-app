@@ -38,6 +38,25 @@ interface StoredPreview {
 }
 
 export default function registerCaptainImportRoutes(api: Router, { db }: Deps): void {
+  api.get('/captain-import/latest-preview', (_req: Request, res: Response) => {
+    const latest = db.get<{ id: number; summary_json: string }>(
+      `SELECT id, summary_json
+       FROM runs
+       WHERE type='preview_folder_captain_import' AND mode='dry' AND status='succeeded'
+       ORDER BY id DESC
+       LIMIT 1`
+    );
+    if (!latest) return res.status(404).json({ error: 'No completed captain-import preview is available yet.' });
+    const summary = JSON.parse(latest.summary_json) as StoredPreview;
+    const errors = Array.isArray(summary.errors) ? summary.errors : [];
+    const readErrors = Array.isArray(summary.readErrors) ? summary.readErrors : [];
+    return res.json({
+      runId: latest.id,
+      ...summary,
+      canApply: summary.addresses.length > 0 && errors.length === 0 && readErrors.length === 0,
+    });
+  });
+
   api.post('/captain-import/preview', async (_req: Request, res: Response) => {
     if (!google.isConfigured()) return res.status(400).json({ error: 'Google is not configured.' });
     const master = db.get<ConnectionRow>("SELECT * FROM connections WHERE type='master' ORDER BY id LIMIT 1");
@@ -110,6 +129,8 @@ export default function registerCaptainImportRoutes(api: Router, { db }: Deps): 
         forbiddenColumns: appDb.zoneDashboardSalesHeaders(),
       });
       const residents = plan.addresses.reduce((sum, address) => sum + address.residents.length, 0);
+      const warnedAddresses = plan.addresses.filter((address) => address.risk !== 'none');
+      const safeAddresses = plan.addresses.filter((address) => address.risk === 'none');
       const summary: StoredPreview = {
         kind: 'folder_captain_import_preview',
         masterSpreadsheetId: master.google_id,
@@ -130,7 +151,10 @@ export default function registerCaptainImportRoutes(api: Router, { db }: Deps): 
           newAddresses: plan.addresses.filter((address) => address.kind === 'new_address').length,
           existingAddresses: plan.addresses.filter((address) => address.kind === 'existing_address').length,
           residents,
-          warnedAddresses: plan.addresses.filter((address) => address.risk !== 'none').length,
+          safeAddresses: safeAddresses.length,
+          safeResidents: safeAddresses.reduce((sum, address) => sum + address.residents.length, 0),
+          warnedAddresses: warnedAddresses.length,
+          warnedResidents: warnedAddresses.reduce((sum, address) => sum + address.residents.length, 0),
           blockedAddresses: plan.blocked.length,
           sheetsScanned: captainSheets.length,
           readErrors: readErrors.length,
