@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { api, ApiError } from '../lib/api';
 import type { FolderCleanupPreviewResponse, QueuedRunResponse } from '../lib/types';
 import { ErrorState, Modal } from './ui';
@@ -8,15 +8,22 @@ export function FolderCleanupPlaybook() {
   const [preview, setPreview] = useState<FolderCleanupPreviewResponse | null>(null);
   const [confirmation, setConfirmation] = useState('');
   const [applying, setApplying] = useState(false);
+  const [loadingPrevious, setLoadingPrevious] = useState(false);
   const [queued, setQueued] = useState<QueuedRunResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const blockedSheets = preview?.sheets.filter((sheet) => sheet.blocks.length > 0) || [];
 
-  useEffect(() => {
-    void api.get<FolderCleanupPreviewResponse>('/folder-cleanup/latest-preview')
-      .then(setPreview)
-      .catch(() => undefined);
-  }, []);
+  async function openPrevious() {
+    setLoadingPrevious(true);
+    setError(null);
+    try {
+      setPreview(await api.get<FolderCleanupPreviewResponse>('/folder-cleanup/latest-preview'));
+    } catch (reason) {
+      setError(reason instanceof ApiError ? reason.message : String(reason));
+    } finally {
+      setLoadingPrevious(false);
+    }
+  }
 
   async function scan() {
     setPreviewing(true);
@@ -58,9 +65,14 @@ export function FolderCleanupPlaybook() {
         standardizing approved dashboard booleans, and protecting private note fields as literal plain text. The scan
         changes nothing. Any unsafe or ambiguous value blocks the whole cleanup.
       </p>
-      <button className="btn highlight" onClick={scan} disabled={previewing}>
-        {previewing ? 'Auditing every sheet…' : 'Preview folder cleanup'}
-      </button>
+      <div className="btn-row">
+        <button className="btn highlight" onClick={scan} disabled={previewing || loadingPrevious}>
+          {previewing ? 'Auditing every sheet…' : 'Preview folder cleanup'}
+        </button>
+        <button className="btn secondary" onClick={openPrevious} disabled={previewing || loadingPrevious}>
+          {loadingPrevious ? 'Opening…' : 'Open last preview'}
+        </button>
+      </div>
       {error && <div style={{ marginTop: 12 }}><ErrorState message={error} /></div>}
 
       {preview && (

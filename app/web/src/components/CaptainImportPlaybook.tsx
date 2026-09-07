@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { api, ApiError } from '../lib/api';
 import type { CaptainImportPreviewResponse, QueuedRunResponse } from '../lib/types';
 import { ErrorState, Modal } from './ui';
@@ -9,6 +9,7 @@ export function CaptainImportPlaybook() {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [confirmation, setConfirmation] = useState('');
   const [applying, setApplying] = useState(false);
+  const [loadingPrevious, setLoadingPrevious] = useState(false);
   const [queued, setQueued] = useState<QueuedRunResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -19,11 +20,17 @@ export function CaptainImportPlaybook() {
     );
   }
 
-  useEffect(() => {
-    void api.get<CaptainImportPreviewResponse>('/captain-import/latest-preview')
-      .then(showPreview)
-      .catch(() => undefined);
-  }, []);
+  async function openPrevious() {
+    setLoadingPrevious(true);
+    setError(null);
+    try {
+      showPreview(await api.get<CaptainImportPreviewResponse>('/captain-import/latest-preview'));
+    } catch (reason) {
+      setError(reason instanceof ApiError ? reason.message : String(reason));
+    } finally {
+      setLoadingPrevious(false);
+    }
+  }
 
   async function scan() {
     setPreviewing(true);
@@ -93,9 +100,14 @@ export function CaptainImportPlaybook() {
         Scans every captain sheet for people missing from the master and groups them by address. The scan makes no
         changes. Rows with unclear identities or incomplete addresses are set aside for review.
       </p>
-      <button className="btn highlight" onClick={scan} disabled={previewing}>
-        {previewing ? 'Scanning every captain sheet…' : 'Scan for captain additions'}
-      </button>
+      <div className="btn-row">
+        <button className="btn highlight" onClick={scan} disabled={previewing || loadingPrevious}>
+          {previewing ? 'Scanning every captain sheet…' : 'Scan for captain additions'}
+        </button>
+        <button className="btn secondary" onClick={openPrevious} disabled={previewing || loadingPrevious}>
+          {loadingPrevious ? 'Opening…' : 'Open last scan'}
+        </button>
+      </div>
       {error && <div style={{ marginTop: 12 }}><ErrorState message={error} /></div>}
 
       {preview && (
