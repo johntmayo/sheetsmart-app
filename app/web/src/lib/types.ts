@@ -564,7 +564,18 @@ export interface CaptainImportPreviewResponse {
   masterTab: string;
   generatedAt: string;
   addresses: CaptainImportAddress[];
-  blocked: Array<{ addressId: string; residentIds: string[]; reason: string }>;
+  blocked: Array<{
+    code?: 'missing_address_id' | 'duplicate_resident' | 'split_across_sheets' | 'address_id_mismatch' | 'missing_required_field';
+    addressId: string;
+    residentIds: string[];
+    reason: string;
+    displayAddress?: string;
+    sourceSpreadsheetId?: string;
+    sourceSpreadsheetName?: string;
+    sourceTabName?: string;
+    sourceRows?: number[];
+    masterAddressId?: string;
+  }>;
   skipped: Array<{ residentId: string; column: string; reason: string; spreadsheetName: string }>;
   columnsOnlyOnCaptains: string[];
   errors: string[];

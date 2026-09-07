@@ -207,16 +207,44 @@ export function CaptainImportPlaybook() {
           )}
 
           {preview.blocked.length > 0 && (
-            <details style={{ marginTop: 16 }}>
-              <summary className="reading-copy" style={{ cursor: 'pointer' }}>
-                Review {preview.blocked.length} blocked address data issue(s)
-              </summary>
+            <section className="card" style={{ marginTop: 18, background: 'var(--floral-white-warm)' }}>
+              <h3 style={{ marginTop: 0 }}>{preview.blocked.length} addresses need repair before import</h3>
+              <p className="reading-copy">
+                These are excluded from this import. Follow the instruction on each card, then run a fresh scan.
+              </p>
               {preview.blocked.slice(0, 100).map((item, index) => (
-                <div className="card-meta" key={`${item.addressId}-${index}`}>
-                  {item.addressId || 'Missing address_id'}: {item.reason}
+                <div
+                  key={`${item.addressId}-${index}`}
+                  style={{ borderTop: '1px solid var(--border-color)', padding: '16px 0' }}
+                >
+                  <strong>{item.displayAddress || `Blocked row ${index + 1}`}</strong>
+                  <div className="reading-copy" style={{ marginTop: 6 }}>
+                    {blockedGuidance(item)}
+                  </div>
+                  {item.sourceSpreadsheetName && (
+                    <div style={{ marginTop: 8 }}>
+                      <strong>Source:</strong>{' '}
+                      {item.sourceSpreadsheetId ? (
+                        <a
+                          href={`https://docs.google.com/spreadsheets/d/${item.sourceSpreadsheetId}/edit`}
+                          target="_blank"
+                          rel="noreferrer"
+                        >
+                          Open {item.sourceSpreadsheetName}
+                        </a>
+                      ) : item.sourceSpreadsheetName}
+                      {item.sourceRows?.length ? ` — row${item.sourceRows.length === 1 ? '' : 's'} ${item.sourceRows.join(', ')}` : ''}
+                    </div>
+                  )}
+                  {item.code === 'address_id_mismatch' && (
+                    <div className="card-meta mono" style={{ marginTop: 8 }}>
+                      Captain Address ID: {item.addressId}<br />
+                      Master Address ID: {item.masterAddressId || 'More than one possible match'}
+                    </div>
+                  )}
                 </div>
               ))}
-            </details>
+            </section>
           )}
 
           {preview.columnsOnlyOnCaptains.length > 0 && (
@@ -270,6 +298,25 @@ export function CaptainImportPlaybook() {
       )}
     </div>
   );
+}
+
+function blockedGuidance(item: CaptainImportPreviewResponse['blocked'][number]): string {
+  if (item.code === 'address_id_mismatch' && item.masterAddressId) {
+    return `Correct fix: keep the master Address ID. In the captain spreadsheet, replace the captain Address ID with ${item.masterAddressId}. Do not change the master.`;
+  }
+  if (item.code === 'address_id_mismatch') {
+    return 'This address matches more than one master record. Review the matching master households before changing any Address ID.';
+  }
+  if (item.code === 'missing_address_id') {
+    return 'This captain row has no Address ID. Open the source row and determine whether it belongs to an existing master address or is genuinely new.';
+  }
+  if (item.code === 'duplicate_resident') {
+    return 'The same Resident ID appears more than once. Keep the correct row and remove or correct the duplicate before importing.';
+  }
+  if (item.code === 'split_across_sheets') {
+    return 'This household appears in multiple captain spreadsheets. Determine the correct zone before importing it.';
+  }
+  return item.reason;
 }
 
 function Metric({ value, label, alert }: { value: number; label: string; alert?: boolean }) {

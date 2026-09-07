@@ -511,9 +511,21 @@ export interface FolderNewAddress {
 }
 
 export interface FolderPullBlock {
+  code:
+    | 'missing_address_id'
+    | 'duplicate_resident'
+    | 'split_across_sheets'
+    | 'address_id_mismatch'
+    | 'missing_required_field';
   addressId: string;
   residentIds: string[];
   reason: string;
+  displayAddress: string;
+  sourceSpreadsheetId: string;
+  sourceSpreadsheetName: string;
+  sourceTabName: string;
+  sourceRows: number[];
+  masterAddressId?: string;
 }
 
 export interface FolderNewResidentsPlan {
@@ -652,10 +664,17 @@ export function planPullNewResidentsFromFolder(
     );
     const sourceIds = new Set(residents.map((resident) => resident.sourceSpreadsheetId));
     let reason = '';
-    if (!addressId) reason = `A captain-created resident has no ${addressColumn}.`;
+    let code: FolderPullBlock['code'] = 'missing_required_field';
+    let masterAddressId: string | undefined;
+    if (!addressId) {
+      code = 'missing_address_id';
+      reason = `A captain-created resident has no ${addressColumn}.`;
+    }
     else if (duplicateIdentity) {
+      code = 'duplicate_resident';
       reason = `Resident ${duplicateIdentity.residentId} appears more than once in the captain folder.`;
     } else if (sourceIds.size > 1) {
+      code = 'split_across_sheets';
       reason = 'Residents at this address appear on more than one captain sheet.';
     } else if (
       !masterAddressIds.has(addressId) &&
@@ -663,16 +682,30 @@ export function planPullNewResidentsFromFolder(
       !matchingMasterAddressIds.has(addressId)
     ) {
       const matches = [...matchingMasterAddressIds].sort();
+      code = 'address_id_mismatch';
+      masterAddressId = matches.length === 1 ? matches[0] : undefined;
       reason =
         matches.length === 1
           ? `${first.property || 'This address'} already exists on the master as address_id ${matches[0]}. ` +
             `The captain row uses a different address_id and must be reconciled before import.`
           : `${first.property || 'This address'} matches multiple master address IDs. Reconcile the duplicate addresses before import.`;
     } else if (residents.some((resident) => resident.missingRequired.length > 0)) {
+      code = 'missing_required_field';
       reason = 'At least one resident is missing a required field.';
     }
     if (reason) {
-      plan.blocked.push({ addressId, residentIds, reason });
+      plan.blocked.push({
+        code,
+        addressId,
+        residentIds,
+        reason,
+        displayAddress: first.property,
+        sourceSpreadsheetId: first.sourceSpreadsheetId,
+        sourceSpreadsheetName: first.sourceSpreadsheetName,
+        sourceTabName: first.sourceTabName,
+        sourceRows: residents.map((resident) => resident.captainRow).sort((a, b) => a - b),
+        masterAddressId,
+      });
       continue;
     }
 
