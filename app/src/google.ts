@@ -8,6 +8,7 @@ import { config } from './config';
 import { assertCurrentJobLease } from './jobs';
 import {
   LEGACY_ADDRESS_COLUMNS,
+  NOTE_TEXT_COLUMNS,
   RETIRED_SALES_COLUMNS,
   type CleanupCell,
   type CleanupDependency,
@@ -342,10 +343,20 @@ export async function readCleanupSheet(
     }
   }
   const dependencies: CleanupDependency[] = [];
-  const selectedTabHasFormula = cells.some((row) =>
-    row.some((cell) => cell.userEnteredValue && typeof cell.userEnteredValue === 'object')
+  const selectedHeaders = (cells[0] || []).map((cell) => String(cell.formattedValue || '').trim());
+  const noteIndexes = new Set(
+    selectedHeaders
+      .map((header, index) => ({ header, index }))
+      .filter((item) => NOTE_TEXT_COLUMNS.includes(item.header as typeof NOTE_TEXT_COLUMNS[number]))
+      .map((item) => item.index)
   );
-  if (selectedTabHasFormula) {
+  const selectedTabHasBlockingFormula = cells.some((row) =>
+    row.some((cell, index) =>
+      !noteIndexes.has(index) &&
+      Boolean(cell.userEnteredValue && typeof cell.userEnteredValue === 'object')
+    )
+  );
+  if (selectedTabHasBlockingFormula) {
     dependencies.push({
       kind: 'formula',
       detail: 'At least one formula exists on this tab; column-reference restoration cannot be guaranteed.',
@@ -354,8 +365,7 @@ export async function readCleanupSheet(
     });
   }
   const structuralHeaders = new Set<string>([...LEGACY_ADDRESS_COLUMNS, ...RETIRED_SALES_COLUMNS]);
-  const selectedHeaders = (cells[0] || []).map((cell) => String(cell.formattedValue || '').trim());
-  if (!selectedTabHasFormula && selectedHeaders.some((header) => structuralHeaders.has(header))) {
+  if (!selectedTabHasBlockingFormula && selectedHeaders.some((header) => structuralHeaders.has(header))) {
     const formulaTab = await findFormulaOnOtherTab(spreadsheetId, tab);
     if (formulaTab) {
       dependencies.push({

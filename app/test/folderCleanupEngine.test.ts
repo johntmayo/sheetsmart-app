@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert';
 import {
   BOOLEAN_COLUMNS,
+  NOTE_TEXT_COLUMNS,
   RETIRED_SALES_COLUMNS,
   cleanupInputFingerprint,
   planFolderCleanup,
@@ -113,6 +114,25 @@ test('cleanup fingerprint detects eligibility changes in unrelated columns', () 
   value.cells[1][baseHeaders.length].userEnteredValue = 'now populated';
 
   assert.notStrictEqual(cleanupInputFingerprint(value), before);
+});
+
+test('converts formulas in private notes to literal text and protects all note columns', () => {
+  const headers = [...baseHeaders, ...NOTE_TEXT_COLUMNS];
+  const master = sheet('master', headers, [[
+    'a1', '10', 'Oak', '', '10', 'Oak',
+    false, false, false, false, false, false, false,
+    { formulaValue: '+2 young girls' },
+    'ordinary address note',
+    '=already literal',
+  ]]);
+
+  const plan = planFolderCleanup(master, []);
+  const sheetPlan = plan.sheets[0];
+
+  assert.deepStrictEqual(sheetPlan.formatTextColumns.map((item) => item.column), [...NOTE_TEXT_COLUMNS]);
+  assert.strictEqual(sheetPlan.noteFormulaChanges.length, 1);
+  assert.strictEqual(sheetPlan.noteFormulaChanges[0].column, 'Person Notes');
+  assert.strictEqual(sheetPlan.noteFormulaChanges[0].afterValue, '+2 young girls');
 });
 
 test('boolean formulas and unknown text block while BOOLEAN validation is removed only from approved fields', () => {

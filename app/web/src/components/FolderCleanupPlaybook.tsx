@@ -55,8 +55,8 @@ export function FolderCleanupPlaybook() {
       <h3 style={{ marginTop: 6 }}>Clean legacy columns and field types</h3>
       <p className="reading-copy">
         Audits the master and every captain sheet before removing retired columns, repairing units from the master,
-        and standardizing approved dashboard booleans. The scan changes nothing. Any unsafe or ambiguous value blocks
-        the whole cleanup.
+        standardizing approved dashboard booleans, and protecting private note fields as literal plain text. The scan
+        changes nothing. Any unsafe or ambiguous value blocks the whole cleanup.
       </p>
       <button className="btn highlight" onClick={scan} disabled={previewing}>
         {previewing ? 'Auditing every sheet…' : 'Preview folder cleanup'}
@@ -80,6 +80,8 @@ export function FolderCleanupPlaybook() {
             <Metric value={preview.totals.columnsDeleted} label="Columns removed" />
             <Metric value={preview.totals.booleansStandardized} label="Booleans standardized" />
             <Metric value={preview.totals.unitsRepaired} label="Captain units repaired" />
+            <Metric value={preview.totals.noteFormulasNeutralized || 0} label="Formula-like notes made safe" />
+            <Metric value={preview.totals.noteColumnsFormatted || 0} label="Private note columns protected" />
             <Metric value={preview.totals.blocks + preview.readErrors.length} label="Blocking issues" alert />
           </div>
 
@@ -98,6 +100,16 @@ export function FolderCleanupPlaybook() {
                     {sheet.spreadsheetName} — {sheet.blocks.length} {sheet.blocks.length === 1 ? 'issue' : 'issues'}
                   </summary>
                   <div style={{ padding: '8px 0 0 22px', maxWidth: 820 }}>
+                    {sheet.spreadsheetId && (
+                      <a
+                        href={`https://docs.google.com/spreadsheets/d/${sheet.spreadsheetId}/edit`}
+                        target="_blank"
+                        rel="noreferrer"
+                        style={{ display: 'inline-block', marginBottom: 12 }}
+                      >
+                        Open this spreadsheet
+                      </a>
+                    )}
                     {sheet.blocks.map((block, index) => (
                       <div key={`${block.code}-${block.row || 0}-${index}`} style={{ marginBottom: 14 }}>
                         <strong>{issueLabel(block.code, block.message)}</strong>
@@ -122,6 +134,7 @@ export function FolderCleanupPlaybook() {
                   <th className="num">Booleans</th>
                   <th className="num">Units</th>
                   <th>Unit format</th>
+                  <th>Private notes</th>
                   <th>Safety result</th>
                 </tr>
               </thead>
@@ -136,6 +149,13 @@ export function FolderCleanupPlaybook() {
                     <td className="num">{sheet.booleansToStandardize}</td>
                     <td className="num">{sheet.unitsToRepair}</td>
                     <td>{sheet.formatUnitAsText ? 'Set full column to text' : 'Column not present'}</td>
+                    <td>
+                      {(sheet.noteColumnsFormatted?.length || 0) > 0
+                        ? `${sheet.noteColumnsFormatted.length} columns protected${
+                            sheet.noteFormulasNeutralized ? ` · ${sheet.noteFormulasNeutralized} formulas made literal` : ''
+                          }`
+                        : 'No note columns found'}
+                    </td>
                     <td>
                       {sheet.blocks.length === 0 ? (
                         <span className="card-meta">Ready</span>

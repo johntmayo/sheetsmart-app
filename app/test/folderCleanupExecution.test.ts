@@ -31,6 +31,8 @@ function plan(): CleanupSheetPlan {
       before: { userEnteredValue: 2 },
       afterValue: '2',
     }],
+    noteFormulaChanges: [],
+    formatTextColumns: [],
     formatUnitColumn: 1,
     blocks: [],
     canApply: true,
@@ -192,4 +194,59 @@ test('Undo blocks edits to unit cells that cleanup did not otherwise change', ()
   };
 
   assert.match(undoSafetyProblem(current, snapshot) || '', /unit cell changed.*row 3/);
+});
+
+test('note cleanup and Undo touch only formula values and number formats', () => {
+  const value = plan();
+  value.noteFormulaChanges = [{
+    row: 2,
+    column: 'Person Notes',
+    colIndex: 5,
+    before: {
+      userEnteredValue: { formulaValue: '+2 young girls' },
+      dataValidation: { condition: { type: 'TEXT_NOT_EQ' } },
+      note: 'cell annotation',
+    },
+    afterValue: '+2 young girls',
+  }];
+  value.formatTextColumns = [{ column: 'Person Notes', colIndex: 5 }];
+
+  const apply = applyRequests(value, 2);
+  const literalWrite = apply.find((request) => request.updateCells?.range?.startColumnIndex === 5);
+  assert.deepStrictEqual(literalWrite?.updateCells?.rows?.[0]?.values?.[0]?.userEnteredValue, {
+    stringValue: '+2 young girls',
+  });
+
+  const snapshot: CleanupSnapshot = {
+    version: 1,
+    folderId: 'folder',
+    role: 'captain',
+    rowCount: 2,
+    columnCount: 6,
+    headersBefore: ['address_id', '_SitusUnit', 'House', 'Street', 'Wants_Updates', 'Person Notes'],
+    headersAfter: ['address_id', '_SitusUnit', 'Wants_Updates', 'Person Notes'],
+    deleted: [],
+    booleans: [],
+    unit: null,
+    noteText: [{
+      column: 'Person Notes',
+      colIndex: 5,
+      before: [
+        { userEnteredValue: 'Person Notes', userEnteredFormat: { numberFormat: { type: 'AUTOMATIC' } } },
+        {
+          userEnteredValue: { formulaValue: '+2 young girls' },
+          userEnteredFormat: { numberFormat: { type: 'AUTOMATIC' } },
+          dataValidation: { condition: { type: 'TEXT_NOT_EQ' } },
+          note: 'cell annotation',
+        },
+      ],
+      changes: [{ row: 2, afterValue: '+2 young girls' }],
+      expectedAfter: ['Person Notes', '+2 young girls'],
+    }],
+  };
+  const undo = undoRequests(snapshot, 77);
+  assert.strictEqual(undo[0].updateCells?.fields, 'userEnteredFormat.numberFormat');
+  assert.strictEqual(undo[1].updateCells?.fields, 'userEnteredValue');
+  assert.ok(!undo[1].updateCells?.fields?.includes('dataValidation'));
+  assert.ok(!undo[1].updateCells?.fields?.includes('note'));
 });

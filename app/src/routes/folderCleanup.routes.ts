@@ -77,6 +77,7 @@ export default function registerFolderCleanupRoutes(api: Router, { db }: Deps): 
         totals: plan.totals,
         readErrors,
         sheets: plan.sheets.map((sheet) => ({
+          spreadsheetId: sheet.spreadsheetId,
           spreadsheetName: sheet.spreadsheetName,
           role: sheet.role,
           tabName: sheet.tabName,
@@ -94,8 +95,15 @@ export default function registerFolderCleanupRoutes(api: Router, { db }: Deps): 
               column: change.column,
               action: 'replace with master value for address_id',
             })),
+            ...sheet.noteFormulaChanges.map((change) => ({
+              row: change.row,
+              column: change.column,
+              action: 'preserve formula-like note as literal private text',
+            })),
           ],
           formatUnitAsText: sheet.formatUnitColumn !== null,
+          noteFormulasNeutralized: sheet.noteFormulaChanges.length,
+          noteColumnsFormatted: sheet.formatTextColumns.map((column) => column.column),
           blocks: sheet.blocks,
           canApply: sheet.canApply,
         })),

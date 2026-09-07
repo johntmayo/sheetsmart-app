@@ -43,6 +43,13 @@ export interface CleanupSnapshot {
     changes: Array<{ row: number; afterValue: unknown }>;
     expectedAfter?: unknown[];
   };
+  noteText?: Array<{
+    column: string;
+    colIndex: number;
+    before: CleanupCell[];
+    changes: Array<{ row: number; afterValue: unknown }>;
+    expectedAfter: unknown[];
+  }>;
 }
 
 interface CleanupSnapshotRow {
@@ -80,6 +87,8 @@ async function executeFolderCleanup(ctx: JobContext): Promise<unknown> {
   let columnsDeleted = 0;
   let booleansStandardized = 0;
   let unitsRepaired = 0;
+  let noteFormulasNeutralized = 0;
+  let noteColumnsFormatted = 0;
   const ordered = fresh.sheets.filter((sheet) => sheet.canApply);
   for (let index = 0; index < ordered.length; index++) {
     ctx.assertLease();
@@ -134,12 +143,15 @@ async function executeFolderCleanup(ctx: JobContext): Promise<unknown> {
     columnsDeleted += plan.deleteColumns.length;
     booleansStandardized += plan.booleanChanges.length;
     unitsRepaired += plan.unitChanges.length;
+    noteFormulasNeutralized += plan.noteFormulaChanges.length;
+    noteColumnsFormatted += plan.formatTextColumns.length;
     ctx.log({
       spreadsheet: plan.spreadsheetName,
       type: 'cleanup',
       message:
         `${plan.deleteColumns.length} column(s) removed; ${plan.booleanChanges.length} boolean(s) standardized; ` +
-        `${plan.unitChanges.length} unit value(s) repaired; _SitusUnit formatted as text.`,
+        `${plan.unitChanges.length} unit value(s) repaired; ${plan.noteFormulaChanges.length} note formula(s) made literal; ` +
+        `${plan.formatTextColumns.length} note column(s) formatted as plain text.`,
     });
   }
   return {
@@ -148,6 +160,8 @@ async function executeFolderCleanup(ctx: JobContext): Promise<unknown> {
     booleansStandardized,
     unitsRepaired,
     unitColumnsFormatted: ordered.filter((sheet) => sheet.formatUnitColumn !== null).length,
+    noteFormulasNeutralized,
+    noteColumnsFormatted,
   };
 }
 
@@ -195,7 +209,7 @@ async function revertFolderCleanup(ctx: JobContext): Promise<unknown> {
 
 export function applyRequests(plan: CleanupSheetPlan, rowCount: number): sheets_v4.Schema$Request[] {
   const requests: sheets_v4.Schema$Request[] = [];
-  for (const change of [...plan.booleanChanges, ...plan.unitChanges].sort(changeOrder)) {
+  for (const change of [...plan.booleanChanges, ...plan.unitChanges, ...plan.noteFormulaChanges].sort(changeOrder)) {
     const cell: sheets_v4.Schema$CellData = { userEnteredValue: extendedValue(change.afterValue) };
     let fields = 'userEnteredValue';
     if (change.removeBooleanValidation) {
@@ -225,6 +239,21 @@ export function applyRequests(plan: CleanupSheetPlan, rowCount: number): sheets_
           endRowIndex: rowCount,
           startColumnIndex: plan.formatUnitColumn,
           endColumnIndex: plan.formatUnitColumn + 1,
+        },
+        cell: { userEnteredFormat: { numberFormat: { type: 'TEXT', pattern: '@' } } },
+        fields: 'userEnteredFormat.numberFormat',
+      },
+    });
+  }
+  for (const column of plan.formatTextColumns) {
+    requests.push({
+      repeatCell: {
+        range: {
+          sheetId: plan.sheetId,
+          startRowIndex: 0,
+          endRowIndex: rowCount,
+          startColumnIndex: column.colIndex,
+          endColumnIndex: column.colIndex + 1,
         },
         cell: { userEnteredFormat: { numberFormat: { type: 'TEXT', pattern: '@' } } },
         fields: 'userEnteredFormat.numberFormat',
@@ -281,6 +310,19 @@ function buildSnapshot(sheet: CleanupSheet, plan: CleanupSheetPlan, folderId: st
             return changed ? changed.afterValue : primitive(sheet.cells[row]?.[plan.formatUnitColumn!] || {});
           }),
         },
+    noteText: plan.formatTextColumns.map((field) => ({
+      ...field,
+      before: column(field.colIndex),
+      changes: plan.noteFormulaChanges
+        .filter((change) => change.colIndex === field.colIndex)
+        .map((change) => ({ row: change.row, afterValue: change.afterValue })),
+      expectedAfter: Array.from({ length: sheet.rowCount }, (_unused, row) => {
+        const changed = plan.noteFormulaChanges.find(
+          (change) => change.colIndex === field.colIndex && change.row === row + 1
+        );
+        return changed ? changed.afterValue : primitive(sheet.cells[row]?.[field.colIndex] || {});
+      }),
+    })),
   };
 }
 
@@ -312,6 +354,17 @@ export function undoSafetyProblem(current: CleanupSheet, snapshot: CleanupSnapsh
       }
     }
   }
+  for (const note of snapshot.noteText || []) {
+    const index = postIndex(note.colIndex, snapshot.deleted);
+    for (let row = 0; row < note.expectedAfter.length; row++) {
+      if (primitive(current.cells[row]?.[index] || {}) !== note.expectedAfter[row]) {
+        return `${note.column} changed after cleanup (row ${row + 1})`;
+      }
+      if (String(current.cells[row]?.[index]?.numberFormat?.type || '').toUpperCase() !== 'TEXT') {
+        return `${note.column} no longer has the cleanup plain-text format`;
+      }
+    }
+  }
   return null;
 }
 
@@ -335,6 +388,20 @@ function postconditionProblem(current: CleanupSheet, plan: CleanupSheetPlan): st
     for (let row = 0; row < current.rowCount; row++) {
       if (String(current.cells[row]?.[index]?.numberFormat?.type || '').toUpperCase() !== 'TEXT') {
         return '_SitusUnit TEXT-format postcondition failed';
+      }
+    }
+  }
+  for (const change of plan.noteFormulaChanges) {
+    const index = postIndex(change.colIndex, plan.deleteColumns);
+    if (primitive(current.cells[change.row - 1]?.[index] || {}) !== change.afterValue) {
+      return `note postcondition failed at row ${change.row}, column ${change.column}`;
+    }
+  }
+  for (const note of plan.formatTextColumns) {
+    const index = postIndex(note.colIndex, plan.deleteColumns);
+    for (let row = 0; row < current.rowCount; row++) {
+      if (String(current.cells[row]?.[index]?.numberFormat?.type || '').toUpperCase() !== 'TEXT') {
+        return `${note.column} plain-text postcondition failed`;
       }
     }
   }
@@ -404,9 +471,54 @@ export function undoRequests(snapshot: CleanupSnapshot, sheetId: number): sheets
           endColumnIndex: snapshot.unit.colIndex + 1,
         },
         rows: snapshot.unit.before.map((cell) => ({ values: [sheetCellData(cell)] })),
-        fields: 'userEnteredValue,userEnteredFormat,dataValidation,note',
+        fields: 'userEnteredFormat.numberFormat',
       },
     });
+    for (const change of snapshot.unit.changes) {
+      requests.push({
+        updateCells: {
+          range: {
+            sheetId,
+            startRowIndex: change.row - 1,
+            endRowIndex: change.row,
+            startColumnIndex: snapshot.unit.colIndex,
+            endColumnIndex: snapshot.unit.colIndex + 1,
+          },
+          rows: [{ values: [sheetCellData(snapshot.unit.before[change.row - 1] || {})] }],
+          fields: 'userEnteredValue',
+        },
+      });
+    }
+  }
+  for (const note of snapshot.noteText || []) {
+    requests.push({
+      updateCells: {
+        range: {
+          sheetId,
+          startRowIndex: 0,
+          endRowIndex: snapshot.rowCount,
+          startColumnIndex: note.colIndex,
+          endColumnIndex: note.colIndex + 1,
+        },
+        rows: note.before.map((cell) => ({ values: [sheetCellData(cell)] })),
+        fields: 'userEnteredFormat.numberFormat',
+      },
+    });
+    for (const change of note.changes) {
+      requests.push({
+        updateCells: {
+          range: {
+            sheetId,
+            startRowIndex: change.row - 1,
+            endRowIndex: change.row,
+            startColumnIndex: note.colIndex,
+            endColumnIndex: note.colIndex + 1,
+          },
+          rows: [{ values: [sheetCellData(note.before[change.row - 1] || {})] }],
+          fields: 'userEnteredValue',
+        },
+      });
+    }
   }
   return requests;
 }

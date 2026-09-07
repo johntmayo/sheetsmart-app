@@ -463,6 +463,7 @@ export interface QueuedRunResponse {
 }
 
 export interface FolderCleanupSheetPreview {
+  spreadsheetId: string;
   spreadsheetName: string;
   role: 'master' | 'captain';
   tabName: string;
@@ -471,6 +472,8 @@ export interface FolderCleanupSheetPreview {
   unitsToRepair: number;
   cellChanges: Array<{ row: number; column: string; action: string }>;
   formatUnitAsText: boolean;
+  noteFormulasNeutralized: number;
+  noteColumnsFormatted: string[];
   blocks: Array<{ code: string; message: string; row?: number; column?: string }>;
   canApply: boolean;
 }
@@ -486,6 +489,8 @@ export interface FolderCleanupPreviewResponse {
     booleansStandardized: number;
     unitsRepaired: number;
     unitColumnsFormatted: number;
+    noteFormulasNeutralized: number;
+    noteColumnsFormatted: number;
     blocks: number;
   };
   readErrors: Array<{ spreadsheet: string; reason: string }>;

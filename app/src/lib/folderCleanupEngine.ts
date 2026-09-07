@@ -19,6 +19,7 @@ export const BOOLEAN_COLUMNS = [
   'Person - Renter',
   'Successfully Contacted',
 ] as const;
+export const NOTE_TEXT_COLUMNS = ['Person Notes', 'Address Notes', 'Outreach Log'] as const;
 
 export type Primitive = string | number | boolean | null;
 
@@ -79,6 +80,8 @@ export interface CleanupSheetPlan {
   deleteColumns: Array<{ header: string; index: number }>;
   booleanChanges: CleanupCellChange[];
   unitChanges: CleanupCellChange[];
+  noteFormulaChanges: CleanupCellChange[];
+  formatTextColumns: Array<{ column: string; colIndex: number }>;
   formatUnitColumn: number | null;
   blocks: CleanupBlock[];
   canApply: boolean;
@@ -97,6 +100,8 @@ export interface FolderCleanupPlan {
     booleansStandardized: number;
     unitsRepaired: number;
     unitColumnsFormatted: number;
+    noteFormulasNeutralized: number;
+    noteColumnsFormatted: number;
     blocks: number;
   };
 }
@@ -123,6 +128,8 @@ export function planFolderCleanup(master: CleanupSheet, captains: CleanupSheet[]
     booleansStandardized: sum(sheets, (sheet) => sheet.booleanChanges.length),
     unitsRepaired: sum(sheets, (sheet) => sheet.unitChanges.length),
     unitColumnsFormatted: sheets.filter((sheet) => sheet.formatUnitColumn !== null).length,
+    noteFormulasNeutralized: sum(sheets, (sheet) => sheet.noteFormulaChanges.length),
+    noteColumnsFormatted: sum(sheets, (sheet) => sheet.formatTextColumns.length),
     blocks: sum(sheets, (sheet) => sheet.blocks.length),
   };
   return { sheets, fingerprint, canApply: totals.blocks === 0 && totals.sheetsChanging > 0, totals };
@@ -262,6 +269,25 @@ function planSheet(
     }
   }
 
+  const noteFormulaChanges: CleanupCellChange[] = [];
+  const formatTextColumns: Array<{ column: string; colIndex: number }> = [];
+  for (const column of NOTE_TEXT_COLUMNS) {
+    const colIndex = headers.indexOf(column);
+    if (colIndex < 0 || duplicates.includes(column)) continue;
+    formatTextColumns.push({ column, colIndex });
+    for (let r = 1; r < sheet.cells.length; r++) {
+      const before = sheet.cells[r]?.[colIndex] || {};
+      if (!isFormula(before)) continue;
+      noteFormulaChanges.push({
+        row: r + 1,
+        column,
+        colIndex,
+        before,
+        afterValue: (before.userEnteredValue as { formulaValue: string }).formulaValue,
+      });
+    }
+  }
+
   const headersAfter = headers.filter((_header, index) => !deletedIndexes.has(index));
   const draft: CleanupSheetPlan = {
     spreadsheetId: sheet.spreadsheetId,
@@ -274,6 +300,8 @@ function planSheet(
     deleteColumns: deleteColumns.sort((a, b) => b.index - a.index),
     booleanChanges,
     unitChanges,
+    noteFormulaChanges,
+    formatTextColumns,
     formatUnitColumn: unitIndex >= 0 && !duplicates.includes('_SitusUnit') ? unitIndex : null,
     blocks: dedupeBlocks(blocks),
     canApply: false,
@@ -403,6 +431,8 @@ function hasChanges(sheet: CleanupSheetPlan): boolean {
   return sheet.deleteColumns.length > 0 ||
     sheet.booleanChanges.length > 0 ||
     sheet.unitChanges.length > 0 ||
+    sheet.noteFormulaChanges.length > 0 ||
+    sheet.formatTextColumns.length > 0 ||
     sheet.formatUnitColumn !== null;
 }
 
@@ -416,6 +446,13 @@ function fingerprintSheetPayload(sheet: CleanupSheetPlan): unknown {
     deleteColumns: sheet.deleteColumns,
     booleans: sheet.booleanChanges.map((change) => [change.row, change.column, currentPrimitive(change.before), change.afterValue]),
     units: sheet.unitChanges.map((change) => [change.row, change.column, currentPrimitive(change.before), change.afterValue]),
+    noteFormulas: sheet.noteFormulaChanges.map((change) => [
+      change.row,
+      change.column,
+      currentPrimitive(change.before),
+      change.afterValue,
+    ]),
+    formatTextColumns: sheet.formatTextColumns,
     formatUnitColumn: sheet.formatUnitColumn,
     blocks: sheet.blocks,
     inputFingerprint: sheet.inputFingerprint,
@@ -431,6 +468,7 @@ function relevantSheetFingerprint(sheet: CleanupSheet, headers: string[]): strin
     ...LEGACY_ADDRESS_COLUMNS,
     ...RETIRED_SALES_COLUMNS,
     ...BOOLEAN_COLUMNS,
+    ...NOTE_TEXT_COLUMNS,
   ]);
   const indexes = headers
     .map((header, index) => ({ header, index }))
