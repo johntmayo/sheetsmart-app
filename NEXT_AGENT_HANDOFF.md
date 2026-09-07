@@ -102,6 +102,17 @@ If the test connection or scan fails, diagnose the concrete API/server error and
 7. Run backend tests/build and frontend build.
 8. Review final git status and commit only intended source changes. Do not add generated `app/dist` or `app/web/dist` files unless repository policy explicitly requires them.
 
+## Deferred feature: meaningful progress indicators
+
+After production acceptance, add progress feedback to long-running scans and live jobs throughout the app:
+
+- Show named stages when total work is not predictable, such as reading the master, reading captain sheets, comparing records, and validating proposed changes.
+- Show a real progress bar only when the denominator is stable and meaningful (for example, captain sheets completed out of total sheets).
+- Extend the existing durable job/status APIs with processed/total counts where necessary and let the frontend poll those fields.
+- The missing-address comparison currently runs as one long HTTP request; accurate live progress will require moving that scan into a tracked background job.
+- Do not use fake percentages that race ahead and then stall. Retain ordinary indeterminate loading indicators for short operations.
+- Progress polling should be infrequent and lightweight; Google API reads/writes, not UI polling, dominate runtime.
+
 ## Important implementation locations
 
 - `app/src/routes/addressIntake.routes.ts`
