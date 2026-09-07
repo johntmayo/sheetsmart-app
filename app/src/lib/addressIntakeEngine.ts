@@ -195,6 +195,8 @@ const DIRECTIONS: Record<string, string> = {
   SW: 'SW',
 };
 
+const NORMALIZED_SUFFIXES = new Set(Object.values(SUFFIXES));
+
 interface ParsedAddress {
   addressId: string;
   apn: string;
@@ -494,8 +496,11 @@ export function planAddressIntake(
   };
   const required = options.requiredFields || ['house', 'street', 'city', 'state', 'zip'];
   const maxBatchSize = options.maxBatchSize ?? 100;
-  const nearMeters = options.nearCoordinateMeters ?? 75;
-  const fuzzyThreshold = options.fuzzyThreshold ?? 0.88;
+  // Ordinary neighboring houses are often within 75 metres of one another.
+  // Proximity is useful only when two records are close enough to plausibly
+  // describe the same building or parcel.
+  const nearMeters = options.nearCoordinateMeters ?? 15;
+  const fuzzyThreshold = options.fuzzyThreshold ?? 0.72;
   const prefix = options.placeholderIdPrefix ?? 'ADDRESS-PLACEHOLDER-';
   if (!Number.isInteger(maxBatchSize) || maxBatchSize < 1) {
     plan.errors.push('maxBatchSize must be a positive integer.');
@@ -656,29 +661,34 @@ export function planAddressIntake(
         (left, right) =>
           coarseRelevance(input, right, nearMeters) - coarseRelevance(input, left, nearMeters) ||
           left.addressId.localeCompare(right.addressId)
-      )
-      .slice(0, 200);
+      );
     for (const value of boundedCandidates) {
       const distance = distanceMeters(input, value);
-      const score = similarity(input.normalizedSitus, value.normalizedSitus);
+      const score = fuzzySitusSimilarity(input, value);
       const reasons: ReviewCandidate['reasons'] = [];
       if (distance !== undefined && distance <= nearMeters) reasons.push('near_coordinate');
-      if (score >= fuzzyThreshold && score < 1) reasons.push('fuzzy_situs');
+      if (score >= fuzzyThreshold && input.normalizedSitus !== value.normalizedSitus) reasons.push('fuzzy_situs');
       if (reasons.length > 0) {
         candidates.push({
           addressId: value.addressId,
           reasons,
           ...(distance !== undefined && distance <= nearMeters ? { distanceMeters: distance } : {}),
-          ...(score >= fuzzyThreshold && score < 1 ? { similarity: score } : {}),
+          ...(score >= fuzzyThreshold && input.normalizedSitus !== value.normalizedSitus
+            ? { similarity: score }
+            : {}),
           canonical: value,
         });
       }
     }
     candidates.sort((a, b) =>
-      (b.similarity || 0) - (a.similarity || 0) ||
+      reviewCandidateRank(b) - reviewCandidateRank(a) ||
       (a.distanceMeters ?? Infinity) - (b.distanceMeters ?? Infinity) ||
+      (b.similarity || 0) - (a.similarity || 0) ||
       a.addressId.localeCompare(b.addressId)
     );
+    // Review is a decision aid, not a dump of every address on the same
+    // street. More than five candidates is not actionable for an operator.
+    candidates.splice(5);
     if (candidates.length > 0) {
       const riskGroups = [...new Set(candidates.flatMap((candidate) => candidate.reasons))] as IntakeRiskGroup[];
       plan.review.push({
@@ -690,7 +700,12 @@ export function planAddressIntake(
           provenance: [{ dataset: 'external', row: externalRow }],
         },
         riskGroups,
-        reason: 'Near-coordinate or fuzzy situs evidence requires human review and cannot adopt an ID.',
+        reason:
+          riskGroups.includes('near_coordinate') && riskGroups.includes('fuzzy_situs')
+            ? 'A very nearby record also has a similarly spelled address. Check whether they are the same place.'
+            : riskGroups.includes('near_coordinate')
+              ? 'An existing record uses nearly the same map location. Check whether they are the same place.'
+              : 'An existing record has the same house number and a very similar street name. Check for a spelling difference.',
         candidates,
       });
       return;
@@ -728,12 +743,7 @@ function coarseCandidate(
   existing: CanonicalAddress,
   nearMeters: number
 ): boolean {
-  const inputStreet = input.street.split(' ')[0] || '';
-  const existingStreet = existing.street.split(' ')[0] || '';
-  if (inputStreet && existingStreet && inputStreet === existingStreet) return true;
-  if (input.zip && existing.zip && input.zip === existing.zip) {
-    if (!inputStreet || !existingStreet || input.house === existing.house) return true;
-  }
+  if (fuzzySitusComparable(input, existing)) return true;
   if (
     input.latitude !== undefined &&
     input.longitude !== undefined &&
@@ -756,13 +766,9 @@ function coarseRelevance(
   nearMeters: number
 ): number {
   let score = 0;
-  if (input.house && input.house === existing.house) score += 30;
-  if (input.zip && input.zip === existing.zip) score += 20;
-  if (input.city && input.city === existing.city) score += 5;
-  const inputStreet = input.street.split(' ')[0] || '';
-  const existingStreet = existing.street.split(' ')[0] || '';
-  if (inputStreet && inputStreet === existingStreet) score += 20;
-  score += 40 * bigramSimilarity(input.normalizedSitus, existing.normalizedSitus);
+  if (fuzzySitusComparable(input, existing)) {
+    score += 75 + 40 * bigramSimilarity(input.street, existing.street);
+  }
   if (
     input.latitude !== undefined &&
     input.longitude !== undefined &&
@@ -775,6 +781,60 @@ function coarseRelevance(
     }
   }
   return score;
+}
+
+/**
+ * Fuzzy spelling is meaningful only after the identity-bearing components
+ * agree. Comparing the whole address made every house on one street appear
+ * 88–97% similar because city/state/ZIP/street text dominated the number.
+ */
+function fuzzySitusComparable(input: ParsedAddress, existing: CanonicalAddress): boolean {
+  return Boolean(
+    input.house &&
+    compactIdentity(input.house) === compactIdentity(existing.house) &&
+    compactIdentity(input.unit) === compactIdentity(existing.unit) &&
+    input.direction === existing.direction &&
+    input.city === existing.city &&
+    input.state === existing.state &&
+    input.zip === existing.zip &&
+    input.street &&
+    existing.street
+  );
+}
+
+function fuzzySitusSimilarity(input: ParsedAddress, existing: CanonicalAddress): number {
+  if (!fuzzySitusComparable(input, existing)) return 0;
+  const inputParts = input.street.split(' ').filter(Boolean);
+  const existingParts = existing.street.split(' ').filter(Boolean);
+  const inputSuffix = NORMALIZED_SUFFIXES.has(inputParts.at(-1) || '') ? inputParts.pop() || '' : '';
+  const existingSuffix = NORMALIZED_SUFFIXES.has(existingParts.at(-1) || '') ? existingParts.pop() || '' : '';
+  // A suffix typo can still be reviewed, but two recognized and conflicting
+  // suffixes (ST versus DR) identify different streets.
+  if (inputSuffix && existingSuffix && inputSuffix !== existingSuffix) return 0;
+  if (inputSuffix && existingSuffix) return similarity(inputParts.join(' '), existingParts.join(' '));
+  if (inputSuffix || existingSuffix) {
+    return Math.max(
+      similarity(inputParts.join(' '), existingParts.join(' ')),
+      similarity(input.street, existing.street)
+    );
+  }
+  return similarity(input.street, existing.street);
+}
+
+function compactIdentity(value: string): string {
+  // Join formatting separators around letter suffixes (10-A ↔ 10A), but keep
+  // numeric separators meaningful (12 1/2 must not become 1212).
+  return words(value)
+    .replace(/(\d)\s+(?=[A-Z])/g, '$1')
+    .replace(/([A-Z])\s+(?=\d)/g, '$1');
+}
+
+function reviewCandidateRank(candidate: ReviewCandidate): number {
+  const near = candidate.reasons.includes('near_coordinate');
+  const fuzzy = candidate.reasons.includes('fuzzy_situs');
+  if (near && fuzzy) return 3;
+  if (near) return 2;
+  return 1;
 }
 
 function bigramSimilarity(left: string, right: string): number {

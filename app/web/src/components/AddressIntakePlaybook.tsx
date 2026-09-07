@@ -246,53 +246,42 @@ export function AddressIntakePlaybook() {
               <summary className="reading-copy" style={{ cursor: 'pointer' }}>
                 Show addresses needing review or correction
               </summary>
-              <div className="table-wrap" style={{ marginTop: 12 }}>
-                <table className="data">
-                  <thead>
-                    <tr>
-                      <th>Source row</th>
-                      <th>Incoming address</th>
-                      <th>Why it was held back</th>
-                      <th>Possible existing matches</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {preview.review.map((item) => (
-                      <tr key={`review-${item.externalRow}`}>
-                        <td>{item.externalRow}</td>
-                        <td>{formatReviewAddress(item.input)}</td>
-                        <td>{item.reason}</td>
-                        <td>
-                          {item.candidates
-                            .map((candidate) => {
-                              const evidence = [
-                                candidate.distanceMeters != null
-                                  ? `${Math.round(candidate.distanceMeters)}m away`
-                                  : '',
-                                candidate.similarity != null
-                                  ? `${Math.round(candidate.similarity * 100)}% text match`
-                                  : '',
-                              ]
-                                .filter(Boolean)
-                                .join(', ');
-                              return `${formatReviewAddress(candidate.canonical)} · ${candidate.addressId}${
-                                evidence ? ` (${evidence})` : ''
-                              }`;
-                            })
-                            .join('; ')}
-                        </td>
-                      </tr>
-                    ))}
-                    {[...preview.blocked, ...preview.mapBlocked].map((item, index) => (
-                      <tr key={`blocked-${item.externalRow}-${index}`}>
-                        <td>{item.externalRow}</td>
-                        <td>—</td>
-                        <td>{item.reason}</td>
-                        <td>Correct the source row, then scan again.</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+              <div style={{ marginTop: 12 }}>
+                {preview.review.map((item) => (
+                  <details className="card" key={`review-${item.externalRow}`} style={{ marginBottom: 10 }}>
+                    <summary style={{ cursor: 'pointer', fontWeight: 700 }}>
+                      Row {item.externalRow}: {formatReviewAddress(item.input)}
+                    </summary>
+                    <p className="reading-copy" style={{ marginBottom: 8 }}>{item.reason}</p>
+                    <strong>
+                      {item.candidates.length === 1
+                        ? 'One existing address may be the same place:'
+                        : `${item.candidates.length} existing addresses may be the same place:`}
+                    </strong>
+                    <ul style={{ marginBottom: 8 }}>
+                      {item.candidates.map((candidate) => (
+                        <li key={candidate.addressId} style={{ marginTop: 8 }}>
+                          {formatReviewAddress(candidate.canonical)}
+                          <div className="card-meta">
+                            {reviewEvidence(candidate)}
+                            {' · '}
+                            <span className="mono">{candidate.addressId}</span>
+                          </div>
+                        </li>
+                      ))}
+                    </ul>
+                    <p className="card-meta">
+                      If one is the same place, correct the outside spreadsheet to match it and scan again.
+                    </p>
+                  </details>
+                ))}
+                {[...preview.blocked, ...preview.mapBlocked].map((item, index) => (
+                  <div className="card" key={`blocked-${item.externalRow}-${index}`} style={{ marginBottom: 10 }}>
+                    <strong>Row {item.externalRow} needs correction</strong>
+                    <p className="reading-copy" style={{ marginBottom: 4 }}>{item.reason}</p>
+                    <span className="card-meta">Correct that row in the outside spreadsheet, then scan again.</span>
+                  </div>
+                ))}
               </div>
             </details>
           )}
@@ -314,6 +303,21 @@ function formatReviewAddress(address: {
     .filter(Boolean)
     .join(' ');
   return address.apn ? `${location} · APN ${address.apn}` : location;
+}
+
+function reviewEvidence(candidate: {
+  distanceMeters?: number;
+  similarity?: number;
+}): string {
+  const evidence = [
+    candidate.distanceMeters != null
+      ? `Map points are ${Math.round(candidate.distanceMeters)} metres apart`
+      : '',
+    candidate.similarity != null
+      ? `Street spelling is ${Math.round(candidate.similarity * 100)}% similar`
+      : '',
+  ].filter(Boolean);
+  return evidence.join(' · ') || 'Possible duplicate';
 }
 
 function Metric({ value, label, alert = false }: { value: number; label: string; alert?: boolean }) {
