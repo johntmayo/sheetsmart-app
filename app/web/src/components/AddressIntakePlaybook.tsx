@@ -35,7 +35,7 @@ interface IntakePreview {
       canonical: { house: string; direction: string; street: string; unit: string; city: string; apn: string };
     }>;
   }>;
-  blocked: Array<{ externalRow: number; reason: string }>;
+  blocked: Array<{ externalRow: number; code?: string; reason: string }>;
   mapBlocked: Array<{ externalRow: number; reason: string }>;
   errors: string[];
   impact: {
@@ -74,6 +74,11 @@ export function AddressIntakePlaybook() {
     () => Boolean(preview?.placeholders.length) && preview!.placeholders.every((item) => selected.has(item.address_id)),
     [preview, selected]
   );
+  const outsideZoneCount =
+    preview?.mapBlocked.filter((item) => item.reason === 'This address is not inside any Mapbox zone.').length || 0;
+  const overlappingZoneCount =
+    preview?.mapBlocked.filter((item) => item.reason === 'This address is inside more than one Mapbox zone.').length || 0;
+  const otherMapBlockedCount = (preview?.mapBlocked.length || 0) - outsideZoneCount - overlappingZoneCount;
 
   async function scan() {
     setBusy(true);
@@ -165,13 +170,31 @@ export function AddressIntakePlaybook() {
           <div className="card-grid" style={{ marginTop: 18 }}>
             <Metric value={preview.impact.sourceRows} label="Source rows checked" />
             <Metric value={preview.impact.alreadyKnown} label="Already represented" />
-            <Metric value={preview.impact.needsReview} label="Possible matches to review" alert />
+            <Metric value={preview.impact.needsReview} label="Need a duplicate check" alert />
             <Metric value={preview.impact.readyToAdd} label="Clearly new addresses" />
           </div>
-          {preview.impact.blocked > 0 && (
+          {preview.blocked.length > 0 && (
             <div className="callout">
-              <strong>{preview.impact.blocked} address(es) need source-data corrections.</strong> They will not be
-              selectable or written.
+              <strong>{preview.blocked.length} source row(s) need correction.</strong> They have missing fields,
+              repeated IDs, or repeated parcel numbers and will not be added.
+            </div>
+          )}
+          {outsideZoneCount > 0 && (
+            <div className="callout warn">
+              <strong>{outsideZoneCount} address(es) are outside every current Mapbox zone.</strong> They may be valid
+              addresses, but SheetSmart has left them unselected because it cannot assign them to a captain zone.
+            </div>
+          )}
+          {overlappingZoneCount > 0 && (
+            <div className="callout warn">
+              <strong>{overlappingZoneCount} address(es) fall inside overlapping Mapbox zones.</strong> Fix the
+              overlapping boundaries before adding them.
+            </div>
+          )}
+          {otherMapBlockedCount > 0 && (
+            <div className="callout warn">
+              <strong>{otherMapBlockedCount} address(es) have another Mapbox or deletion-history restriction.</strong>{' '}
+              Open the review section below for details.
             </div>
           )}
           {preview.errors.length > 0 && <ErrorState message={preview.errors.join(' ')} />}
@@ -275,11 +298,20 @@ export function AddressIntakePlaybook() {
                     </p>
                   </details>
                 ))}
-                {[...preview.blocked, ...preview.mapBlocked].map((item, index) => (
+                {preview.blocked.map((item, index) => (
                   <div className="card" key={`blocked-${item.externalRow}-${index}`} style={{ marginBottom: 10 }}>
                     <strong>Row {item.externalRow} needs correction</strong>
                     <p className="reading-copy" style={{ marginBottom: 4 }}>{item.reason}</p>
                     <span className="card-meta">Correct that row in the outside spreadsheet, then scan again.</span>
+                  </div>
+                ))}
+                {preview.mapBlocked.map((item, index) => (
+                  <div className="card" key={`map-blocked-${item.externalRow}-${index}`} style={{ marginBottom: 10 }}>
+                    <strong>Row {item.externalRow} was not selected</strong>
+                    <p className="reading-copy" style={{ marginBottom: 4 }}>{item.reason}</p>
+                    <span className="card-meta">
+                      Review its location or Mapbox boundary before deciding what to do with it.
+                    </span>
                   </div>
                 ))}
               </div>

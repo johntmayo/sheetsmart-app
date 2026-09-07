@@ -499,7 +499,7 @@ export function planAddressIntake(
   // Ordinary neighboring houses are often within 75 metres of one another.
   // Proximity is useful only when two records are close enough to plausibly
   // describe the same building or parcel.
-  const nearMeters = options.nearCoordinateMeters ?? 15;
+  const nearMeters = options.nearCoordinateMeters ?? 5;
   const fuzzyThreshold = options.fuzzyThreshold ?? 0.72;
   const prefix = options.placeholderIdPrefix ?? 'ADDRESS-PLACEHOLDER-';
   if (!Number.isInteger(maxBatchSize) || maxBatchSize < 1) {

@@ -345,6 +345,26 @@ test('does not treat different house numbers on the same street as fuzzy matches
   assert.strictEqual(plan.placeholders.length, 1);
 });
 
+test('does not hold back neighboring houses based only on map points ten metres apart', () => {
+  const plan = planAddressIntake(
+    [incoming({ House: '102', Street: 'Maple Street', Latitude: 34, Longitude: -118 })],
+    [
+      {
+        ...master[0],
+        House: '100',
+        Direction: '',
+        Street: 'Maple Street',
+        ZIP: '90003',
+        Latitude: 34.00009,
+        Longitude: -118,
+      },
+    ]
+  );
+
+  assert.strictEqual(plan.review.length, 0);
+  assert.strictEqual(plan.placeholders.length, 1);
+});
+
 test('limits review output to the five most plausible existing addresses', () => {
   const sameLocation = Array.from({ length: 12 }, (_, index) => ({
     address_id: `NEAR-${index}`,
