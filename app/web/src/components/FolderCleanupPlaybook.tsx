@@ -114,7 +114,7 @@ export function FolderCleanupPlaybook() {
                       <div key={`${block.code}-${block.row || 0}-${index}`} style={{ marginBottom: 14 }}>
                         <strong>{issueLabel(block.code, block.message)}</strong>
                         <div className="reading-copy" style={{ marginTop: 2 }}>
-                          {block.message}
+                          {issueExplanation(block.code, block.message)}
                           {block.row ? ` Check row ${block.row}${block.column ? `, column ${block.column}` : ''}.` : ''}
                         </div>
                       </div>
@@ -218,8 +218,19 @@ function issueLabel(code: string, message: string): string {
   if (code === 'unsafe_master_unit') return 'Unit value may have been converted by Google Sheets';
   if (code === 'invalid_boolean') return 'Boolean field contains an unexpected value';
   if (code === 'blank_canonical_address') return 'Canonical address information is missing';
-  if (code === 'unit_authority_missing') return 'Address is missing from the master unit audit';
+  if (code === 'unit_authority_missing') return 'Captain address is not connected to the master yet';
+  if (code === 'blank_address_id') return 'Captain row is missing its Address ID';
   return 'Safety check stopped this spreadsheet';
+}
+
+function issueExplanation(code: string, message: string): string {
+  if (code === 'unit_authority_missing') {
+    return 'This row’s Address ID does not exist in the master. Usually, a captain added the address. Run “Scan for captain additions” before returning to cleanup.';
+  }
+  if (code === 'blank_address_id') {
+    return 'SheetSmart cannot connect this row to a household until it has an Address ID.';
+  }
+  return message;
 }
 
 function Metric({ value, label, alert }: { value: number; label: string; alert?: boolean }) {
