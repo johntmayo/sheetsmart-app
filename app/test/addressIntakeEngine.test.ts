@@ -67,15 +67,15 @@ test('matches by exact address_id first and adopts its canonical spelling', () =
   assert.strictEqual(plan.placeholders.length, 0);
 });
 
-test('matches by APN before normalized situs and adopts the existing ID', () => {
+test('matches by normalized situs regardless of APN metadata', () => {
   const plan = planAddressIntake(
     [incoming({ APN: 'p-200', House: '20', Street: 'Pine Rd', Unit: '2', ZIP: '90002' })],
     master
   );
 
-  assert.strictEqual(plan.matches[0].tier, 'apn');
+  assert.strictEqual(plan.matches[0].tier, 'normalized_situs');
   assert.strictEqual(plan.matches[0].addressId, 'A-200');
-  assert.strictEqual(plan.matches[0].riskGroup, 'exact_parcel');
+  assert.strictEqual(plan.matches[0].riskGroup, 'exact_situs');
 });
 
 test('matches normalized situs across direction, suffix, unit, punctuation, and ZIP+4 variants', () => {
@@ -181,7 +181,7 @@ test('uses independently configurable headers for all three datasets', () => {
   );
 
   assert.strictEqual(plan.matches[0].addressId, 'C1');
-  assert.strictEqual(plan.matches[0].tier, 'apn');
+  assert.strictEqual(plan.matches[0].tier, 'normalized_situs');
   assert.deepStrictEqual(plan.matches[0].canonical.provenance, [{ dataset: 'captain', row: 1 }]);
 });
 
@@ -215,7 +215,7 @@ test('blocks canonical adoption when master and captain disagree on one existing
   assert.match(plan.blocked[0].reason, /master\/captain records/i);
 });
 
-test('blocks every occurrence of a duplicate incoming address_id', () => {
+test('blocks an incoming address_id attached to different street addresses', () => {
   const plan = planAddressIntake(
     [
       incoming({ address_id: 'NEW-1', House: '30' }),
@@ -225,7 +225,7 @@ test('blocks every occurrence of a duplicate incoming address_id', () => {
   );
 
   assert.strictEqual(plan.blocked.length, 2);
-  assert.ok(plan.blocked.every((item) => item.code === 'duplicate_incoming_id'));
+  assert.ok(plan.blocked.every((item) => item.code === 'conflicting_identity'));
   assert.strictEqual(plan.placeholders.length, 0);
 });
 
@@ -244,7 +244,7 @@ test('blocks missing required fields and supports an explicit required-field pol
   assert.strictEqual(relaxed.placeholders.length, 1);
 });
 
-test('blocks ambiguous exact APN and exact situs matches', () => {
+test('does not use APN alone as identity and blocks ambiguous exact situs matches', () => {
   const duplicateParcel = [
     ...master,
     { ...master[1], address_id: 'A-201' },
@@ -253,8 +253,8 @@ test('blocks ambiguous exact APN and exact situs matches', () => {
     [incoming({ APN: 'P-200', House: '99', Street: 'Other St', ZIP: '90009' })],
     duplicateParcel
   );
-  assert.strictEqual(byApn.blocked[0].code, 'ambiguous_match');
-  assert.deepStrictEqual(byApn.blocked[0].conflictingAddressIds, ['A-200', 'A-201']);
+  assert.strictEqual(byApn.blocked.length, 0);
+  assert.strictEqual(byApn.placeholders.length, 1);
 
   const duplicateSitus = [
     master[0],
@@ -523,7 +523,7 @@ test('fingerprints change with identity-affecting input and ignore blank externa
   assert.strictEqual(base.blocked.length, 0);
 });
 
-test('blocks every repeated incoming APN before generating placeholders', () => {
+test('allows distinct incoming addresses to share one APN', () => {
   const plan = planAddressIntake(
     [
       incoming({ APN: 'NEW-1', House: '31' }),
@@ -531,12 +531,11 @@ test('blocks every repeated incoming APN before generating placeholders', () => 
     ],
     master
   );
-  assert.strictEqual(plan.blocked.length, 2);
-  assert.strictEqual(plan.placeholders.length, 0);
-  assert.ok(plan.blocked.every((item) => item.reason.includes('APN NEW-1')));
+  assert.strictEqual(plan.blocked.length, 0);
+  assert.strictEqual(plan.placeholders.length, 2);
 });
 
-test('blocks every repeated normalized incoming situs before generating placeholders', () => {
+test('combines repeated incoming situs rows into one placeholder', () => {
   const plan = planAddressIntake(
     [
       incoming({ address_id: 'NEW-A', APN: '', Street: 'Cedar Avenue' }),
@@ -544,9 +543,77 @@ test('blocks every repeated normalized incoming situs before generating placehol
     ],
     master
   );
-  assert.strictEqual(plan.blocked.length, 2);
-  assert.strictEqual(plan.placeholders.length, 0);
-  assert.ok(plan.blocked.every((item) => item.reason.includes('normalized street address')));
+  assert.strictEqual(plan.blocked.length, 0);
+  assert.strictEqual(plan.placeholders.length, 1);
+  assert.strictEqual(plan.coalescedSourceRows, 1);
+  assert.deepStrictEqual(plan.placeholders[0].provenance_rows, [2, 3]);
+});
+
+test('combines the same source ID and situs instead of rejecting both rows', () => {
+  const plan = planAddressIntake(
+    [
+      incoming({ address_id: 'SOURCE-1', APN: 'PARCEL-A' }),
+      incoming({ address_id: 'SOURCE-1', APN: 'PARCEL-B', Latitude: 34.5, Longitude: -118.2 }),
+    ],
+    []
+  );
+
+  assert.strictEqual(plan.blocked.length, 0);
+  assert.strictEqual(plan.placeholders.length, 1);
+  assert.deepStrictEqual(plan.placeholders[0].provenance_rows, [2, 3]);
+});
+
+test('does not let a later coalesced row hide an ID belonging to another address', () => {
+  const rows = [
+    incoming({ address_id: 'NEW-SOURCE', House: '30', Street: 'Cedar Avenue' }),
+    incoming({ address_id: 'A-100', House: '30', Street: 'Cedar Avenue' }),
+  ];
+  for (const ordered of [rows, [...rows].reverse()]) {
+    const plan = planAddressIntake(ordered, master);
+    assert.strictEqual(plan.placeholders.length, 0);
+    assert.ok(plan.blocked.some((item) => item.code === 'conflicting_identity'));
+  }
+});
+
+test('uses complete coordinates from a later copy of the same source address', () => {
+  const plan = planAddressIntake(
+    [
+      incoming({ address_id: 'SOURCE-A', Latitude: '', Longitude: '' }),
+      incoming({ address_id: 'SOURCE-B', Latitude: 34.25, Longitude: -118.15 }),
+    ],
+    []
+  );
+
+  assert.strictEqual(plan.placeholders.length, 1);
+  assert.strictEqual(plan.placeholders[0].latitude, 34.25);
+  assert.strictEqual(plan.placeholders[0].longitude, -118.15);
+});
+
+test('generates the same new ID when APN coordinates or source ID change', () => {
+  const first = planAddressIntake(
+    [incoming({ address_id: 'SOURCE-A', APN: 'PARCEL-A', Latitude: 34, Longitude: -118 })],
+    []
+  );
+  const second = planAddressIntake(
+    [incoming({ address_id: 'SOURCE-B', APN: 'PARCEL-B', Latitude: 34.01, Longitude: -118.01 })],
+    []
+  );
+
+  assert.strictEqual(first.placeholders[0].address_id, second.placeholders[0].address_id);
+});
+
+test('keeps different units on a shared APN as distinct addresses', () => {
+  const plan = planAddressIntake(
+    [
+      incoming({ APN: 'SHARED-PARCEL', House: '40', Unit: '1' }),
+      incoming({ APN: 'SHARED-PARCEL', House: '40', Unit: '2' }),
+    ],
+    []
+  );
+
+  assert.strictEqual(plan.blocked.length, 0);
+  assert.strictEqual(plan.placeholders.length, 2);
+  assert.notStrictEqual(plan.placeholders[0].address_id, plan.placeholders[1].address_id);
 });
 
 test('ranks a relevant fuzzy candidate before the review cap', () => {

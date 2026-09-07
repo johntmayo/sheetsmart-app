@@ -1,6 +1,6 @@
 import * as db from './db';
 import * as google from './google';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type { JobContext } from './jobs';
 import { registerTask } from './jobs';
 import { planPushMissingResidents, trimHeaders, type Grid } from './lib/mergeEngine';
@@ -3251,6 +3251,8 @@ const ADDRESS_INTAKE_HEADERS: Partial<AddressHeaders> = {
 interface ApprovedIntakeAddress extends AddressPlaceholder {
   resident_id: string;
   zoneFields: Record<string, string>;
+  captainSpreadsheetId: string;
+  captainSpreadsheetName: string;
 }
 
 async function applyAddressIntake(ctx: JobContext): Promise<unknown> {
@@ -3291,12 +3293,19 @@ async function applyAddressIntake(ctx: JobContext): Promise<unknown> {
   }
   const sourceGrid: Grid = [sourceHeaders.headers, ...sourceRaw.slice(1)];
   const masterGrid: Grid = [masterHeaders.headers, ...masterRaw.slice(1)];
-  const captainSheets = await readCaptainFolder(folder.google_id, 10);
-  const captainRows: AddressRow[] = [];
-  for (const sheet of captainSheets) {
+  const captainSheets = (await readCaptainFolder(folder.google_id, 10)).map((sheet) => {
     const canonical = canonicalizeHeaders(sheet.grid[0] || [], dictionary);
     if (canonical.errors.length) throw new Error(`${sheet.spreadsheetName}: ${canonical.errors.join(' ')}`);
-    captainRows.push(...gridToAddressObjects([canonical.headers, ...sheet.grid.slice(1)]));
+    const grid = [canonical.headers, ...sheet.grid.slice(1)] as Grid;
+    return {
+      ...sheet,
+      zone: detectSheetZoneWithName(canonical.headers, grid.slice(1), sheet.spreadsheetName),
+      grid,
+    };
+  });
+  const captainRows: AddressRow[] = [];
+  for (const sheet of captainSheets) {
+    captainRows.push(...gridToAddressObjects(sheet.grid));
   }
   const deletedAddresses = await activeDeletedAddressEvidence();
   const fresh = planAddressIntake(
@@ -3307,7 +3316,7 @@ async function applyAddressIntake(ctx: JobContext): Promise<unknown> {
       externalHeaders: addressHeadersForGrid(sourceGrid[0] || []),
       masterHeaders: addressHeadersForGrid(masterGrid[0] || []),
       captainHeaders: ADDRESS_INTAKE_HEADERS,
-      requiredFields: ['house', 'street', 'city', 'state', 'zip', 'latitude', 'longitude'],
+      requiredFields: ['house', 'street', 'city', 'state', 'zip'],
       maxBatchSize: 250,
       placeholderIdPrefix: 'addr_',
     }
@@ -3317,30 +3326,65 @@ async function applyAddressIntake(ctx: JobContext): Promise<unknown> {
   }
 
   const freshById = new Map(fresh.placeholders.map((row) => [row.address_id, row]));
-  const spatial = buildSpatialIndex(await fetchZoneFeatures(loadZoneSource()));
+  let mapboxAvailable = false;
+  let intakeFeatures: Awaited<ReturnType<typeof fetchZoneFeatures>> = {
+    type: 'FeatureCollection',
+    features: [],
+  };
+  if (isMapboxConfigured()) {
+    try {
+      intakeFeatures = await fetchZoneFeatures(loadZoneSource());
+      mapboxAvailable = true;
+    } catch {
+      // Zone classification is optional for intake. A transient Mapbox failure
+      // must not prevent a valid address from entering the master.
+    }
+  }
+  const spatial = buildSpatialIndex(intakeFeatures);
+  let zoneAssignmentsDeferred = 0;
+  let captainPublishingDeferred = 0;
   for (const expected of approved) {
     const current = freshById.get(expected.address_id);
     if (!current || current.fingerprint !== expected.fingerprint) {
       throw new Error(`Address ${expected.address_id} no longer matches the approved preview.`);
     }
-    const matches = findContainingFeatures(spatial, [Number(current.longitude), Number(current.latitude)]);
-    if (matches.length !== 1) {
-      throw new Error(`Address ${expected.address_id} no longer maps to exactly one Mapbox zone.`);
-    }
     if (deletedAddresses.addressIds.has(expected.address_id)) {
       throw new Error(`Address ${expected.address_id} is tombstoned and must be restored instead of imported.`);
     }
-    const currentZoneFields = Object.fromEntries(
-      ZONE_OUTPUT_FIELDS.map((field) => [
-        field.canonical,
-        String(matches[0].properties?.[field.property] ?? '').trim(),
-      ])
-    );
-    if (!String(currentZoneFields.ZoneName || '').trim()) {
-      throw new Error(`The containing Mapbox shape for ${expected.address_id} has no ZoneName.`);
+    let currentZoneFields: Record<string, string> = {};
+    if (
+      mapboxAvailable &&
+      current.latitude !== '' &&
+      current.longitude !== ''
+    ) {
+      const matches = findContainingFeatures(spatial, [Number(current.longitude), Number(current.latitude)]);
+      if (matches.length === 1 && String(matches[0].properties?.ZoneName ?? '').trim()) {
+        currentZoneFields = Object.fromEntries(
+          ZONE_OUTPUT_FIELDS.map((field) => [
+            field.canonical,
+            String(matches[0].properties?.[field.property] ?? '').trim(),
+          ])
+        );
+      }
     }
     if (JSON.stringify(currentZoneFields) !== JSON.stringify(expected.zoneFields)) {
-      throw new Error(`Mapbox changed for address ${expected.address_id}. Run a fresh address scan.`);
+      // Master admission is authoritative for this workflow; stale or
+      // unavailable derived zoning falls back to an unzoned master row.
+      expected.zoneFields = {};
+      expected.captainSpreadsheetId = '';
+      expected.captainSpreadsheetName = '';
+      zoneAssignmentsDeferred++;
+      continue;
+    }
+    const currentDestinationSheets = currentZoneFields.ZoneName
+      ? captainSheets.filter((sheet) => sheet.zone === currentZoneFields.ZoneName)
+      : [];
+    const currentDestinationId =
+      currentDestinationSheets.length === 1 ? currentDestinationSheets[0].spreadsheetId : '';
+    if (currentDestinationId !== String(expected.captainSpreadsheetId || '')) {
+      expected.captainSpreadsheetId = '';
+      expected.captainSpreadsheetName = '';
+      captainPublishingDeferred++;
     }
   }
 
@@ -3352,6 +3396,73 @@ async function applyAddressIntake(ctx: JobContext): Promise<unknown> {
       guarded.errors.join('; ') ||
         'One or more addresses now collide with an existing master identity. No addresses were added.'
     );
+  }
+  const plannedMasterGrid: Grid = [
+    masterGrid[0],
+    ...masterGrid.slice(1),
+    ...rows,
+  ];
+  const candidatePublishMoves: AddressMoveCandidate[] = [];
+  let zonedWithoutCaptainSheet = 0;
+  for (let index = 0; index < approved.length; index++) {
+    const address = approved[index];
+    const toZone = String(address.zoneFields.ZoneName || '').trim();
+    if (!toZone) continue;
+    const destination = captainSheets.find(
+      (sheet) => sheet.spreadsheetId === String(address.captainSpreadsheetId || '')
+    );
+    if (!destination) {
+      zonedWithoutCaptainSheet++;
+      continue;
+    }
+    candidatePublishMoves.push({
+      kind: 'assign',
+      addressId: address.address_id,
+      displayAddress: [address.house, address.direction, address.street, address.unit].filter(Boolean).join(' '),
+      fromZone: '',
+      toZone,
+      fromSpreadsheetId: '',
+      fromSpreadsheetName: '',
+      fromTabName: '',
+      toSpreadsheetId: destination.spreadsheetId,
+      toSpreadsheetName: destination.spreadsheetName,
+      toTabName: '',
+      destinationFields: address.zoneFields,
+      residents: [
+        {
+          residentId: address.resident_id,
+          residentName: '',
+          sourcePresent: false,
+          destinationPresent: false,
+          sensitiveData: [],
+          sourceRowHash: createHash('sha256')
+            .update(JSON.stringify(rows[index].map((value) => String(value ?? ''))))
+            .digest('hex'),
+        },
+      ],
+    });
+  }
+  const publishMoves: AddressMoveCandidate[] = [];
+  const movesByDestination = new Map<string, AddressMoveCandidate[]>();
+  for (const move of candidatePublishMoves) {
+    movesByDestination.set(move.toSpreadsheetId, [
+      ...(movesByDestination.get(move.toSpreadsheetId) || []),
+      move,
+    ]);
+  }
+  for (const destinationMoves of movesByDestination.values()) {
+    try {
+      await hydrateMoveTabs(destinationMoves);
+      await preflightFolderZoneWrites(destinationMoves, plannedMasterGrid);
+      publishMoves.push(...destinationMoves);
+    } catch {
+      captainPublishingDeferred += destinationMoves.length;
+      ctx.log({
+        spreadsheet: destinationMoves[0].toSpreadsheetName,
+        type: 'address_intake_publish_deferred',
+        message: 'Addresses will enter the master, but this captain sheet was not safe to update.',
+      });
+    }
   }
   const snapshot = db.transaction(() => {
     for (const append of guarded.appends) {
@@ -3381,6 +3492,7 @@ async function applyAddressIntake(ctx: JobContext): Promise<unknown> {
   if (result.updatedRows !== guarded.appends.length) {
     throw new Error(`Google added ${result.updatedRows} of ${guarded.appends.length} approved addresses.`);
   }
+  const captainRowsAdded = await appendNewlyZonedResidents(ctx, publishMoves, plannedMasterGrid);
   ctx.log({
     spreadsheet: master.name,
     type: 'address_intake',
@@ -3389,8 +3501,15 @@ async function applyAddressIntake(ctx: JobContext): Promise<unknown> {
   return {
     previewRunId: ctx.params.previewRunId,
     addressesAdded: guarded.appends.length,
+    captainRowsAdded,
+    zonedWithoutCaptainSheet,
+    zoneAssignmentsDeferred,
+    captainPublishingDeferred,
     updatedRange: result.updatedRange,
-    nextStep: 'Run the Mapbox boundary workflow to place these addresses on captain sheets.',
+    nextStep:
+      zonedWithoutCaptainSheet > 0 || zoneAssignmentsDeferred > 0 || captainPublishingDeferred > 0
+        ? 'The addresses are in the master. Run the Mapbox boundary workflow later for any zone assignment or captain-sheet publication that was deferred.'
+        : 'Every selected address with an existing captain zone was also added to that captain sheet.',
     revertAvailable: true,
   };
 }
@@ -3993,8 +4112,13 @@ async function appendNewlyZonedResidents(
   let appended = 0;
   for (const destinationMoves of byDestination.values()) {
     const destination = destinationMoves[0];
-    const destinationGrid = await readGrid(destination.toSpreadsheetId, destination.toTabName);
-    const destinationHeaders = trimHeaders(destinationGrid[0]);
+    const rawDestinationGrid = await readGrid(destination.toSpreadsheetId, destination.toTabName);
+    const canonical = canonicalizeHeaders(rawDestinationGrid[0] || [], loadDictionaryAliases());
+    if (canonical.errors.length > 0) {
+      throw new Error(`${destination.toSpreadsheetName}: ${canonical.errors.join(' ')}`);
+    }
+    const destinationGrid = [canonical.headers, ...rawDestinationGrid.slice(1)] as Grid;
+    const destinationHeaders = trimHeaders(canonical.headers);
     const distributedColumns = new Set(captainDistributedHeaders(destinationHeaders));
     for (const column of Object.keys(destination.destinationFields)) {
       if (!destinationHeaders.includes(column)) {
@@ -4039,7 +4163,7 @@ async function appendNewlyZonedResidents(
             JSON.stringify({
               kind: 'folder_zone_assign',
               toZone: destination.toZone,
-              headers: destinationHeaders,
+              headers: trimHeaders(rawDestinationGrid[0]),
             }),
           ]
         );
@@ -4095,8 +4219,13 @@ async function preflightFolderZoneWrites(moves: AddressMoveCandidate[], masterGr
   }
   for (const destinationMoves of assignmentGroups.values()) {
     const destination = destinationMoves[0];
-    const destinationGrid = await readGrid(destination.toSpreadsheetId, destination.toTabName);
-    const destinationHeaders = trimHeaders(destinationGrid[0]);
+    const rawDestinationGrid = await readGrid(destination.toSpreadsheetId, destination.toTabName);
+    const canonical = canonicalizeHeaders(rawDestinationGrid[0] || [], loadDictionaryAliases());
+    if (canonical.errors.length > 0) {
+      throw new Error(`${destination.toSpreadsheetName}: ${canonical.errors.join(' ')}`);
+    }
+    const destinationGrid = [canonical.headers, ...rawDestinationGrid.slice(1)] as Grid;
+    const destinationHeaders = trimHeaders(canonical.headers);
     const distributedColumns = new Set(captainDistributedHeaders(destinationHeaders));
     const rows: Grid = [];
     for (const move of destinationMoves) {

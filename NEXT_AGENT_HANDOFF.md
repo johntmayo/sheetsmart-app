@@ -21,6 +21,8 @@ You are taking over an active effort to finish SheetSmart, a single-operator adm
 - SQLite currently stores configuration, jobs, run history, conflicts, tombstones, and safety metadata. Google Sheets still hold operational data.
 - Captain deletions use soft deletion plus a private operations workbook, archival evidence, tombstones, activity events, and restoration.
 - Property-sales distribution is retired. Sales data now comes from a central source used directly by Zone Dashboard. Keep generic outside-source plumbing, but do not copy sales fields into master/captain data.
+- Missing-address intake is master-first: every distinct valid street address enters the master even when coordinates are missing or no current Mapbox zone contains it. Mapbox is optional downstream classification, never an admission gate. Addresses with exactly one safe existing captain-zone destination are also published to that captain sheet in the same approved run; all others remain master-only and can be zoned later.
+- APN is non-unique metadata, not address identity. Address intake deduplicates by normalized situs (including unit), validates known `address_id` values against situs, and combines repeated source rows rather than rejecting every copy.
 - `House`, `Street`, and retired sales columns should be removed through the cleanup workflow.
 - `_SitusUnit` must be text.
 - Boolean cleanup semantics are: blank/unchecked/text `FALSE` become boolean `FALSE`; checked/text `TRUE` become boolean `TRUE`; no checkbox formatting is required.

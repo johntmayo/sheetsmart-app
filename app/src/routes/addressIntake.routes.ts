@@ -2,7 +2,12 @@ import type { Request, Response, Router } from 'express';
 import type { Deps } from '../types';
 import * as google from '../google';
 import * as jobs from '../jobs';
-import { canonicalizeHeaders, findColumn, type DictionaryAliasSpec } from '../lib/columns';
+import {
+  canonicalizeHeaders,
+  detectSheetZoneWithName,
+  findColumn,
+  type DictionaryAliasSpec,
+} from '../lib/columns';
 import {
   planAddressIntake,
   type AddressHeaders,
@@ -41,6 +46,8 @@ const ADDRESS_HEADERS: Partial<AddressHeaders> = {
 export interface ZonedAddressPlaceholder extends AddressPlaceholder {
   resident_id: string;
   zoneFields: Record<string, string>;
+  captainSpreadsheetId: string;
+  captainSpreadsheetName: string;
 }
 
 export default function registerAddressIntakeRoutes(api: Router, { db }: Deps): void {
@@ -55,7 +62,6 @@ export default function registerAddressIntakeRoutes(api: Router, { db }: Deps): 
 
   api.post('/address-intake/preview', async (req: Request, res: Response) => {
     if (!google.isConfigured()) return res.status(400).json({ error: 'Google is not configured.' });
-    if (!isMapboxConfigured()) return res.status(400).json({ error: 'Mapbox is not configured.' });
     const sourceId = Number(req.body?.sourceConnectionId);
     if (!Number.isInteger(sourceId) || sourceId <= 0) {
       return res.status(400).json({ error: 'Choose the spreadsheet containing missing addresses.' });
@@ -83,65 +89,118 @@ export default function registerAddressIntakeRoutes(api: Router, { db }: Deps): 
     const runId = Number(insert.lastInsertRowid);
     try {
       const dictionary = loadDictionary(db);
-      const [sourceGrid, masterGrid, captainRows, features] = await Promise.all([
+      const mapboxConfigured = isMapboxConfigured();
+      const [sourceGrid, masterGrid, captainData, zoneLoad] = await Promise.all([
         readCanonicalGrid(source.google_id, source.source_tab, dictionary),
         readCanonicalGrid(master.google_id, master.source_tab, dictionary),
         readCaptainAddresses(folder.google_id, dictionary),
-        fetchZoneFeatures(loadZoneSource(db)),
+        mapboxConfigured
+          ? fetchZoneFeatures(loadZoneSource(db))
+              .then((features) => ({ available: true, features, warning: '' }))
+              .catch(() => ({
+                available: false,
+                features: { type: 'FeatureCollection' as const, features: [] },
+                warning: 'Mapbox could not be read. New addresses can still be added to the master unzoned.',
+              }))
+          : Promise.resolve({
+              available: false,
+              features: { type: 'FeatureCollection' as const, features: [] },
+              warning: 'Mapbox is not configured. New addresses can still be added to the master unzoned.',
+            }),
       ]);
+      const { available: mapboxAvailable, features, warning: zoneReadWarning } = zoneLoad;
       const deletedAddresses = await readActiveDeletedAddressRows(db);
       const plan = planAddressIntake(
         gridObjects(sourceGrid),
         [...gridObjects(masterGrid), ...deletedAddresses.rows],
-        captainRows,
+        captainData.rows,
         {
           externalHeaders: addressHeadersFor(sourceGrid[0] || []),
           masterHeaders: addressHeadersFor(masterGrid[0] || []),
           captainHeaders: ADDRESS_HEADERS,
-          requiredFields: ['house', 'street', 'city', 'state', 'zip', 'latitude', 'longitude'],
+          requiredFields: ['house', 'street', 'city', 'state', 'zip'],
           maxBatchSize: 250,
           placeholderIdPrefix: 'addr_',
         }
       );
       const spatial = buildSpatialIndex(features);
-      const mapBlocked: Array<{ externalRow: number; addressId: string; reason: string }> = [];
+      const historyBlocked: Array<{ externalRow: number; addressId: string; reason: string }> = [];
       for (const match of plan.matches.filter((item) => deletedAddresses.addressIds.has(item.addressId))) {
-        mapBlocked.push({
+        historyBlocked.push({
           externalRow: match.externalRow,
           addressId: match.addressId,
           reason: 'This address was deliberately deleted and remains archived. Restore it instead of importing it.',
         });
       }
       const zoned: ZonedAddressPlaceholder[] = [];
+      const zoneWarnings: Array<{ externalRow: number; addressId: string; reason: string }> = [];
+      const publishWarnings: Array<{ externalRow: number; addressId: string; reason: string }> = [];
       for (const placeholder of plan.placeholders) {
+        let assignedZoneFields: Record<string, string> = {};
+        let captainSpreadsheetId = '';
+        let captainSpreadsheetName = '';
+        if (placeholder.latitude === '' || placeholder.longitude === '') {
+          zoneWarnings.push({
+            externalRow: placeholder.provenance_row,
+            addressId: placeholder.address_id,
+            reason: 'Coordinates are missing, so this address will be added to the master without a zone.',
+          });
+        } else if (!mapboxAvailable) {
+          zoneWarnings.push({
+            externalRow: placeholder.provenance_row,
+            addressId: placeholder.address_id,
+            reason: 'Mapbox is unavailable, so this address will be added to the master without a zone.',
+          });
+        } else {
         const matches = findContainingFeatures(spatial, [
           Number(placeholder.longitude),
           Number(placeholder.latitude),
         ]);
-        if (matches.length !== 1) {
-          mapBlocked.push({
-            externalRow: placeholder.provenance_row,
-            addressId: placeholder.address_id,
-            reason:
-              matches.length === 0
-                ? 'This address is not inside any Mapbox zone.'
-                : 'This address is inside more than one Mapbox zone.',
-          });
-          continue;
-        }
-        const zoneName = String(matches[0].properties?.ZoneName ?? '').trim();
-        if (!zoneName) {
-          mapBlocked.push({
-            externalRow: placeholder.provenance_row,
-            addressId: placeholder.address_id,
-            reason: 'The containing Mapbox shape has no ZoneName.',
-          });
-          continue;
+          if (matches.length === 0) {
+            zoneWarnings.push({
+              externalRow: placeholder.provenance_row,
+              addressId: placeholder.address_id,
+              reason: 'This address is outside every current Mapbox zone and will be added to the master unzoned.',
+            });
+          } else if (matches.length > 1) {
+            zoneWarnings.push({
+              externalRow: placeholder.provenance_row,
+              addressId: placeholder.address_id,
+              reason: 'This address is inside overlapping Mapbox zones and will be added to the master unzoned.',
+            });
+          } else {
+            const zoneName = String(matches[0].properties?.ZoneName ?? '').trim();
+            if (!zoneName) {
+              zoneWarnings.push({
+                externalRow: placeholder.provenance_row,
+                addressId: placeholder.address_id,
+                reason: 'The containing Mapbox shape has no zone name, so this address will be added unzoned.',
+              });
+            } else {
+              assignedZoneFields = zoneFields(matches[0]);
+              const captainTargets = captainData.zoneSheets[zoneName] || [];
+              if (captainTargets.length === 1) {
+                captainSpreadsheetId = captainTargets[0].spreadsheetId;
+                captainSpreadsheetName = captainTargets[0].spreadsheetName;
+              } else {
+                publishWarnings.push({
+                  externalRow: placeholder.provenance_row,
+                  addressId: placeholder.address_id,
+                  reason:
+                    captainTargets.length === 0
+                      ? `${zoneName} has no captain sheet yet. This address will enter the master now and can be published after that sheet is created.`
+                      : `${zoneName} maps to more than one captain sheet. This address will enter the master now but will not be published until that is corrected.`,
+                });
+              }
+            }
+          }
         }
         zoned.push({
           ...placeholder,
           resident_id: `__address_placeholder__:${placeholder.address_id}`,
-          zoneFields: zoneFields(matches[0]),
+          zoneFields: assignedZoneFields,
+          captainSpreadsheetId,
+          captainSpreadsheetName,
         });
       }
       const summary = {
@@ -154,15 +213,25 @@ export default function registerAddressIntakeRoutes(api: Router, { db }: Deps): 
         matches: plan.matches.filter((item) => !deletedAddresses.addressIds.has(item.addressId)),
         review: plan.review,
         blocked: plan.blocked,
-        mapBlocked,
+        historyBlocked,
+        zoneWarnings,
+        publishWarnings,
+        zoneReadWarning,
         placeholders: zoned,
         errors: plan.errors,
         impact: {
           sourceRows: Math.max(0, sourceGrid.length - 1),
           alreadyKnown: plan.matches.filter((item) => !deletedAddresses.addressIds.has(item.addressId)).length,
           needsReview: plan.review.length,
-          blocked: plan.blocked.length + mapBlocked.length,
+          blocked: plan.blocked.length + historyBlocked.length,
           readyToAdd: zoned.length,
+          readyZoned: zoned.filter((item) => Boolean(item.zoneFields.ZoneName)).length,
+          readyUnzoned: zoned.filter((item) => !item.zoneFields.ZoneName).length,
+          readyForCaptain: zoned.filter(
+            (item) => Boolean(item.captainSpreadsheetId)
+          ).length,
+          zonedWithoutCaptainSheet: publishWarnings.length,
+          sourceDuplicatesCombined: plan.coalescedSourceRows,
         },
       };
       db.run(
@@ -246,17 +315,41 @@ async function readCanonicalGrid(
 async function readCaptainAddresses(
   folderId: string,
   dictionary: DictionaryAliasSpec[]
-): Promise<AddressRow[]> {
+): Promise<{
+  rows: AddressRow[];
+  zoneSheets: Record<string, Array<{ spreadsheetId: string; spreadsheetName: string }>>;
+}> {
   const files = await google.listSpreadsheetsInFolder(folderId);
   files.sort((left, right) => left.id.localeCompare(right.id));
   const rowsByFile = new Map<string, AddressRow[]>();
+  const zoneByFile = new Map<string, string>();
   await mapLimit(files, 10, async (file) => {
     const grid = await google.readValues(file.id, 'A:ZZ');
     const canonical = canonicalizeHeaders(grid[0] || [], dictionary);
     if (canonical.errors.length > 0) throw new Error(`${file.name}: ${canonical.errors.join(' ')}`);
     rowsByFile.set(file.id, gridObjects([canonical.headers, ...grid.slice(1)]));
+    zoneByFile.set(
+      file.id,
+      detectSheetZoneWithName(
+        canonical.headers.map((value) => String(value ?? '').trim()),
+        grid.slice(1),
+        file.name
+      )
+    );
   });
-  return files.flatMap((file) => rowsByFile.get(file.id) || []);
+  const zoneSheets: Record<string, Array<{ spreadsheetId: string; spreadsheetName: string }>> = {};
+  for (const file of files) {
+    const zone = zoneByFile.get(file.id) || '';
+    if (!zone) continue;
+    zoneSheets[zone] = [
+      ...(zoneSheets[zone] || []),
+      { spreadsheetId: file.id, spreadsheetName: file.name },
+    ];
+  }
+  return {
+    rows: files.flatMap((file) => rowsByFile.get(file.id) || []),
+    zoneSheets,
+  };
 }
 
 function gridObjects(grid: any[][]): AddressRow[] {

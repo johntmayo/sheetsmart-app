@@ -14,7 +14,7 @@ export type AddressField =
   | 'latitude'
   | 'longitude';
 export type AddressHeaders = Record<AddressField, string>;
-export type ExactMatchTier = 'address_id' | 'apn' | 'normalized_situs';
+export type ExactMatchTier = 'address_id' | 'normalized_situs';
 export type IntakeRiskGroup =
   | 'exact_identity'
   | 'exact_parcel'
@@ -63,6 +63,7 @@ export interface CanonicalAddress {
 
 export interface AddressMatch {
   externalRow: number;
+  externalRows: number[];
   inputAddressId: string;
   addressId: string;
   tier: ExactMatchTier;
@@ -117,6 +118,7 @@ export interface AddressPlaceholder {
   longitude: number | '';
   provenance_dataset: 'external';
   provenance_row: number;
+  provenance_rows: number[];
   provenance_input_address_id: string;
   risk_group: 'new_address';
   fingerprint: string;
@@ -131,6 +133,7 @@ export interface AddressIntakePlan {
   batches: AddressPlaceholder[][];
   fingerprint: string;
   errors: string[];
+  coalescedSourceRows: number;
 }
 
 const DEFAULT_HEADERS: AddressHeaders = {
@@ -353,18 +356,16 @@ function canonicalize(entries: ExistingEntry[]): Map<string, CanonicalAddress> {
 }
 
 function conflictingExistingEvidence(entries: ExistingEntry[]): Map<string, string[]> {
-  const evidence = new Map<string, { apns: Set<string>; situses: Set<string> }>();
+  const evidence = new Map<string, { situses: Set<string> }>();
   for (const entry of entries) {
     if (!entry.addressId) continue;
-    const item = evidence.get(entry.addressId) || { apns: new Set<string>(), situses: new Set<string>() };
-    if (entry.apn) item.apns.add(entry.apn);
+    const item = evidence.get(entry.addressId) || { situses: new Set<string>() };
     if (entry.normalizedSitus) item.situses.add(entry.normalizedSitus);
     evidence.set(entry.addressId, item);
   }
   const conflicts = new Map<string, string[]>();
   for (const [addressId, item] of evidence) {
     const fields: string[] = [];
-    if (item.apns.size > 1) fields.push('APN');
     if (item.situses.size > 1) fields.push('normalized situs');
     if (fields.length > 0) conflicts.set(addressId, fields);
   }
@@ -373,11 +374,6 @@ function conflictingExistingEvidence(entries: ExistingEntry[]): Map<string, stri
 
 function ids(index: Map<string, Set<string>>, key: string): string[] {
   return [...(index.get(key) || [])].sort();
-}
-
-function intersection(nonEmptySets: string[][]): string[] {
-  if (nonEmptySets.length === 0) return [];
-  return nonEmptySets[0].filter((id) => nonEmptySets.every((set) => set.includes(id))).sort();
 }
 
 function union(sets: string[][]): string[] {
@@ -427,32 +423,19 @@ function distanceMeters(a: ParsedAddress, b: CanonicalAddress): number | undefin
   return 6371000 * 2 * Math.atan2(Math.sqrt(x), Math.sqrt(1 - x));
 }
 
-function evidenceConflict(evidence: Array<{ name: string; matches: string[] }>): string[] {
-  const nonEmpty = evidence.filter((item) => item.matches.length > 0);
-  if (nonEmpty.length < 2) return [];
-  const common = intersection(nonEmpty.map((item) => item.matches));
-  return common.length === 0 ? union(nonEmpty.map((item) => item.matches)) : [];
-}
-
 function riskForTier(tier: ExactMatchTier): IntakeRiskGroup {
   if (tier === 'address_id') return 'exact_identity';
-  if (tier === 'apn') return 'exact_parcel';
   return 'exact_situs';
 }
 
 function placeholderFor(
   input: ParsedAddress,
-  externalRow: number,
+  externalRows: number[],
   prefix: string
 ): AddressPlaceholder {
-  const identity = {
-    apn: input.apn,
-    situs: input.normalizedSitus,
-    latitude: input.latitude ?? null,
-    longitude: input.longitude ?? null,
-    inputAddressId: input.addressId,
-  };
+  const identity = { version: 1, situs: input.normalizedSitus };
   const fingerprint = hash(identity);
+  const externalRow = externalRows[0];
   return {
     address_id: `${prefix}${fingerprint.slice(0, 20).toUpperCase()}`,
     record_type: 'address_placeholder',
@@ -468,6 +451,7 @@ function placeholderFor(
     longitude: input.longitude ?? '',
     provenance_dataset: 'external',
     provenance_row: externalRow,
+    provenance_rows: externalRows,
     provenance_input_address_id: input.addressId,
     risk_group: 'new_address',
     fingerprint,
@@ -493,6 +477,7 @@ export function planAddressIntake(
     batches: [],
     fingerprint: '',
     errors: [],
+    coalescedSourceRows: 0,
   };
   const required = options.requiredFields || ['house', 'street', 'city', 'state', 'zip'];
   const maxBatchSize = options.maxBatchSize ?? 100;
@@ -529,33 +514,36 @@ export function planAddressIntake(
   const canonical = canonicalize(existing);
   const existingConflicts = conflictingExistingEvidence(existing);
   const byId = new Map<string, Set<string>>();
-  const byApn = new Map<string, Set<string>>();
   const bySitus = new Map<string, Set<string>>();
   for (const value of canonical.values()) {
     addToIndex(byId, value.addressId, value.addressId);
-    addToIndex(byApn, value.apn, value.addressId);
     addToIndex(bySitus, value.normalizedSitus, value.addressId);
   }
 
   const parsedExternal = externalRows.map((row) => parse(row, externalMap));
-  const incomingIdCounts = new Map<string, number>();
-  const incomingApnCounts = new Map<string, number>();
-  const incomingSitusCounts = new Map<string, number>();
-  for (const input of parsedExternal) {
-    if (input.addressId) incomingIdCounts.set(input.addressId, (incomingIdCounts.get(input.addressId) || 0) + 1);
-    if (input.apn) incomingApnCounts.set(input.apn, (incomingApnCounts.get(input.apn) || 0) + 1);
+  const incomingRowsBySitus = new Map<string, number[]>();
+  const incomingSitusesById = new Map<string, Set<string>>();
+  for (let index = 0; index < parsedExternal.length; index++) {
+    if (isEmpty(externalRows[index])) continue;
+    let input = parsedExternal[index];
+    const externalRow = index + 2;
     if (input.normalizedSitus) {
-      incomingSitusCounts.set(
-        input.normalizedSitus,
-        (incomingSitusCounts.get(input.normalizedSitus) || 0) + 1
-      );
+      incomingRowsBySitus.set(input.normalizedSitus, [
+        ...(incomingRowsBySitus.get(input.normalizedSitus) || []),
+        externalRow,
+      ]);
+      if (input.addressId) {
+        const situses = incomingSitusesById.get(input.addressId) || new Set<string>();
+        situses.add(input.normalizedSitus);
+        incomingSitusesById.set(input.addressId, situses);
+      }
     }
   }
 
   externalRows.forEach((raw, index) => {
     if (isEmpty(raw)) return;
     const externalRow = index + 2;
-    const input = parsedExternal[index];
+    let input = parsedExternal[index];
     const block = (
       code: AddressBlockCode,
       reason: string,
@@ -571,18 +559,6 @@ export function planAddressIntake(
       });
     };
 
-    if (input.addressId && (incomingIdCounts.get(input.addressId) || 0) > 1) {
-      block('duplicate_incoming_id', `Incoming address_id ${input.addressId} appears more than once.`);
-      return;
-    }
-    if (input.apn && (incomingApnCounts.get(input.apn) || 0) > 1) {
-      block('ambiguous_match', `Incoming APN ${input.apn} appears more than once.`);
-      return;
-    }
-    if (input.normalizedSitus && (incomingSitusCounts.get(input.normalizedSitus) || 0) > 1) {
-      block('ambiguous_match', 'This normalized street address appears more than once in the incoming file.');
-      return;
-    }
     const missing = required.filter((field) => {
       if (field === 'latitude') return input.latitude === undefined;
       if (field === 'longitude') return input.longitude === undefined;
@@ -592,31 +568,68 @@ export function planAddressIntake(
       block('missing_required_fields', `Missing required address fields: ${missing.join(', ')}.`);
       return;
     }
-
-    const idMatches = ids(byId, input.addressId);
-    const apnMatches = ids(byApn, input.apn);
-    const situsMatches = ids(bySitus, input.normalizedSitus);
-    const evidence = [
-      { name: 'address_id', matches: idMatches },
-      { name: 'APN', matches: apnMatches },
-      { name: 'normalized situs', matches: situsMatches },
-    ];
-    const conflicts = evidenceConflict(evidence);
-    if (conflicts.length > 0) {
+    const idSituses = input.addressId ? incomingSitusesById.get(input.addressId) : undefined;
+    if (idSituses && idSituses.size > 1) {
       block(
         'conflicting_identity',
-        `Identity evidence points to different existing addresses (${evidence
-          .filter((item) => item.matches.length)
-          .map((item) => `${item.name}: ${item.matches.join(', ')}`)
-          .join('; ')}).`,
-        conflicts
+        `Incoming address_id ${input.addressId} is attached to more than one street address.`
+      );
+      return;
+    }
+    const sourceRows = (incomingRowsBySitus.get(input.normalizedSitus) || [externalRow]).filter((rowNumber) => {
+      const groupedInput = parsedExternal[rowNumber - 2];
+      const groupedIdSituses = groupedInput?.addressId
+        ? incomingSitusesById.get(groupedInput.addressId)
+        : undefined;
+      return !groupedIdSituses || groupedIdSituses.size <= 1;
+    });
+    const conflictingKnownIds = sourceRows.flatMap((rowNumber) => {
+      const groupedInput = parsedExternal[rowNumber - 2];
+      if (!groupedInput?.addressId) return [];
+      return ids(byId, groupedInput.addressId).filter(
+        (addressId) => canonical.get(addressId)?.normalizedSitus !== input.normalizedSitus
+      );
+    });
+    if (conflictingKnownIds.length > 0) {
+      block(
+        'conflicting_identity',
+        'One of the repeated source rows uses an address ID that already belongs to a different street address.',
+        union([conflictingKnownIds, ids(bySitus, input.normalizedSitus)])
+      );
+      return;
+    }
+    if (sourceRows[0] !== externalRow) {
+      plan.coalescedSourceRows++;
+      return;
+    }
+    const groupedInputs = sourceRows.map((rowNumber) => parsedExternal[rowNumber - 2]);
+    const coordinateSource = groupedInputs.find(
+      (value) => value.latitude !== undefined && value.longitude !== undefined
+    );
+    input = {
+      ...input,
+      apn: input.apn || groupedInputs.find((value) => value.apn)?.apn || '',
+      latitude: coordinateSource?.latitude ?? input.latitude,
+      longitude: coordinateSource?.longitude ?? input.longitude,
+    };
+
+    const idMatches = ids(byId, input.addressId);
+    const situsMatches = ids(bySitus, input.normalizedSitus);
+    if (
+      idMatches.length > 0 &&
+      situsMatches.length > 0 &&
+      !situsMatches.includes(idMatches[0])
+    ) {
+      block(
+        'conflicting_identity',
+        'The incoming address ID and street address point to different existing addresses.',
+        union([idMatches, situsMatches])
       );
       return;
     }
 
     const tierEvidence: Array<{ tier: ExactMatchTier; matches: string[] }> = [
       { tier: 'address_id', matches: idMatches },
-      { tier: 'apn', matches: apnMatches },
       { tier: 'normalized_situs', matches: situsMatches },
     ];
     const selected = tierEvidence.find((item) => item.matches.length > 0);
@@ -643,8 +656,17 @@ export function planAddressIntake(
       }
       const value = canonical.get(addressId);
       if (!value) throw new Error(`Internal address index error for ${addressId}.`);
+      if (selected.tier === 'address_id' && value.normalizedSitus !== input.normalizedSitus) {
+        block(
+          'conflicting_identity',
+          'This incoming address ID already belongs to a different street address.',
+          [addressId]
+        );
+        return;
+      }
       plan.matches.push({
         externalRow,
+        externalRows: sourceRows,
         inputAddressId: input.addressId,
         addressId,
         tier: selected.tier,
@@ -711,7 +733,7 @@ export function planAddressIntake(
       return;
     }
 
-    plan.placeholders.push(placeholderFor(input, externalRow, prefix));
+    plan.placeholders.push(placeholderFor(input, sourceRows, prefix));
   });
 
   for (let index = 0; index < plan.placeholders.length; index += maxBatchSize) {

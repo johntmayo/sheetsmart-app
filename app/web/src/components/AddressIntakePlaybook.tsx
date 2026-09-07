@@ -36,7 +36,10 @@ interface IntakePreview {
     }>;
   }>;
   blocked: Array<{ externalRow: number; code?: string; reason: string }>;
-  mapBlocked: Array<{ externalRow: number; reason: string }>;
+  historyBlocked: Array<{ externalRow: number; reason: string }>;
+  zoneWarnings: Array<{ externalRow: number; reason: string }>;
+  publishWarnings: Array<{ externalRow: number; reason: string }>;
+  zoneReadWarning: string;
   errors: string[];
   impact: {
     sourceRows: number;
@@ -44,6 +47,11 @@ interface IntakePreview {
     needsReview: number;
     blocked: number;
     readyToAdd: number;
+    readyZoned: number;
+    readyUnzoned: number;
+    readyForCaptain: number;
+    zonedWithoutCaptainSheet: number;
+    sourceDuplicatesCombined: number;
   };
   canApply: boolean;
 }
@@ -75,10 +83,10 @@ export function AddressIntakePlaybook() {
     [preview, selected]
   );
   const outsideZoneCount =
-    preview?.mapBlocked.filter((item) => item.reason === 'This address is not inside any Mapbox zone.').length || 0;
+    preview?.zoneWarnings.filter((item) => item.reason.includes('outside every current Mapbox zone')).length || 0;
   const overlappingZoneCount =
-    preview?.mapBlocked.filter((item) => item.reason === 'This address is inside more than one Mapbox zone.').length || 0;
-  const otherMapBlockedCount = (preview?.mapBlocked.length || 0) - outsideZoneCount - overlappingZoneCount;
+    preview?.zoneWarnings.filter((item) => item.reason.includes('overlapping Mapbox zones')).length || 0;
+  const otherZoneWarningCount = (preview?.zoneWarnings.length || 0) - outsideZoneCount - overlappingZoneCount;
 
   async function scan() {
     setBusy(true);
@@ -101,7 +109,7 @@ export function AddressIntakePlaybook() {
     if (!preview || selectedCount < 1 || selectedCount > 250) return;
     if (
       !confirm(
-        `Add ${selectedCount} address-only record${selectedCount === 1 ? '' : 's'} to the real master? Every addition can be undone from Runs.`
+        `Add ${selectedCount} address-only record${selectedCount === 1 ? '' : 's'} to the real master? Addresses with an existing captain zone will also be added to that captain sheet. Every addition can be undone from Runs.`
       )
     ) {
       return;
@@ -140,8 +148,9 @@ export function AddressIntakePlaybook() {
       <div className="eyebrow">Occasional data intake</div>
       <h3>Add missing addresses safely</h3>
       <p className="reading-copy">
-        Compares an outside address list against the master and every captain sheet. Exact matches are kept, close
-        matches wait for review, and only clearly new addresses can be added.
+        Compares an outside address list against the master and every captain sheet. Every distinct new address can be
+        added to the master, even when it is not inside a current Mapbox zone. Mapbox only determines whether it can
+        also be assigned to a captain zone.
       </p>
       <div className="btn-row">
         <select className="select" value={sourceId} onChange={(event) => setSourceId(event.target.value)}>
@@ -172,32 +181,62 @@ export function AddressIntakePlaybook() {
             <Metric value={preview.impact.alreadyKnown} label="Already represented" />
             <Metric value={preview.impact.needsReview} label="Need a duplicate check" alert />
             <Metric value={preview.impact.readyToAdd} label="Clearly new addresses" />
+            <Metric value={preview.impact.readyZoned} label="Inside a Mapbox zone" />
+            <Metric value={preview.impact.readyUnzoned} label="Ready without a zone" />
+            <Metric value={preview.impact.readyForCaptain} label="Will also enter captain sheets" />
           </div>
+          {preview.impact.sourceDuplicatesCombined > 0 && (
+            <div className="callout">
+              <strong>
+                {preview.impact.sourceDuplicatesCombined} repeated source row(s) were combined automatically.
+              </strong>{' '}
+              Each distinct street address will be added only once.
+            </div>
+          )}
           {preview.blocked.length > 0 && (
             <div className="callout">
               <strong>{preview.blocked.length} source row(s) need correction.</strong> They have missing fields,
-              repeated IDs, or repeated parcel numbers and will not be added.
+              conflicting address IDs, or another identity problem and will not be added.
             </div>
           )}
           {outsideZoneCount > 0 && (
-            <div className="callout warn">
+            <div className="callout">
               <strong>{outsideZoneCount} address(es) are outside every current Mapbox zone.</strong> They may be valid
-              addresses, but SheetSmart has left them unselected because it cannot assign them to a captain zone.
+              addresses and are ready to add to the master without a zone.
             </div>
           )}
           {overlappingZoneCount > 0 && (
             <div className="callout warn">
               <strong>{overlappingZoneCount} address(es) fall inside overlapping Mapbox zones.</strong> Fix the
-              overlapping boundaries before adding them.
+              overlapping boundaries later; these addresses can still be added to the master unzoned.
             </div>
           )}
-          {otherMapBlockedCount > 0 && (
+          {otherZoneWarningCount > 0 && (
+            <div className="callout">
+              <strong>{otherZoneWarningCount} address(es) cannot currently be assigned to a zone.</strong> They are
+              still ready to add to the master unzoned.
+            </div>
+          )}
+          {preview.historyBlocked.length > 0 && (
             <div className="callout warn">
-              <strong>{otherMapBlockedCount} address(es) have another Mapbox or deletion-history restriction.</strong>{' '}
-              Open the review section below for details.
+              <strong>{preview.historyBlocked.length} archived address(es) cannot be re-imported.</strong> Restore
+              those records instead if they are needed.
+            </div>
+          )}
+          {preview.publishWarnings.length > 0 && (
+            <div className="callout warn">
+              <strong>
+                {preview.publishWarnings.length} zoned address(es) cannot reach a captain sheet yet.
+              </strong>{' '}
+              They are still ready for the master. Open the review section for the missing or duplicated zone sheets.
             </div>
           )}
           {preview.errors.length > 0 && <ErrorState message={preview.errors.join(' ')} />}
+          {preview.zoneReadWarning && (
+            <div className="callout warn">
+              <strong>Zone lookup was unavailable.</strong> {preview.zoneReadWarning}
+            </div>
+          )}
 
           {preview.placeholders.length > 0 && (
             <>
@@ -243,7 +282,7 @@ export function AddressIntakePlaybook() {
                         <td>
                           {[item.house, item.direction, item.street, item.unit, item.city].filter(Boolean).join(' ')}
                         </td>
-                        <td>{item.zoneFields.ZoneName || '—'}</td>
+                        <td>{item.zoneFields.ZoneName || 'Unzoned'}</td>
                         <td className="mono">{item.address_id}</td>
                       </tr>
                     ))}
@@ -264,7 +303,11 @@ export function AddressIntakePlaybook() {
             </>
           )}
 
-          {(preview.review.length > 0 || preview.blocked.length > 0 || preview.mapBlocked.length > 0) && (
+          {(preview.review.length > 0 ||
+            preview.blocked.length > 0 ||
+            preview.historyBlocked.length > 0 ||
+            preview.zoneWarnings.length > 0 ||
+            preview.publishWarnings.length > 0) && (
             <details style={{ marginTop: 18 }}>
               <summary className="reading-copy" style={{ cursor: 'pointer' }}>
                 Show addresses needing review or correction
@@ -305,13 +348,29 @@ export function AddressIntakePlaybook() {
                     <span className="card-meta">Correct that row in the outside spreadsheet, then scan again.</span>
                   </div>
                 ))}
-                {preview.mapBlocked.map((item, index) => (
-                  <div className="card" key={`map-blocked-${item.externalRow}-${index}`} style={{ marginBottom: 10 }}>
-                    <strong>Row {item.externalRow} was not selected</strong>
+                {preview.historyBlocked.map((item, index) => (
+                  <div className="card" key={`history-blocked-${item.externalRow}-${index}`} style={{ marginBottom: 10 }}>
+                    <strong>Row {item.externalRow} is archived</strong>
                     <p className="reading-copy" style={{ marginBottom: 4 }}>{item.reason}</p>
                     <span className="card-meta">
-                      Review its location or Mapbox boundary before deciding what to do with it.
+                      Restore the archived record rather than creating a duplicate.
                     </span>
+                  </div>
+                ))}
+                {preview.zoneWarnings.map((item, index) => (
+                  <div className="card" key={`zone-warning-${item.externalRow}-${index}`} style={{ marginBottom: 10 }}>
+                    <strong>Row {item.externalRow} will be added without a zone</strong>
+                    <p className="reading-copy" style={{ marginBottom: 4 }}>{item.reason}</p>
+                    <span className="card-meta">
+                      This does not prevent the address from being added to the master.
+                    </span>
+                  </div>
+                ))}
+                {preview.publishWarnings.map((item, index) => (
+                  <div className="card" key={`publish-warning-${item.externalRow}-${index}`} style={{ marginBottom: 10 }}>
+                    <strong>Row {item.externalRow} cannot reach its captain sheet yet</strong>
+                    <p className="reading-copy" style={{ marginBottom: 4 }}>{item.reason}</p>
+                    <span className="card-meta">It can still be added to the master in this run.</span>
                   </div>
                 ))}
               </div>
