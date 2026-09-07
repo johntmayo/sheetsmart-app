@@ -151,6 +151,10 @@ export function AddressIntakePlaybook() {
           {busy ? 'Comparing addresses…' : 'Scan address list'}
         </button>
       </div>
+      <p className="card-meta" style={{ marginTop: 10 }}>
+        Only outside spreadsheets connected under <a href="/sources">Sources</a> appear here.{' '}
+        <a href="/sources">Add or manage outside address lists</a>.
+      </p>
       {sources.length === 0 && (
         <p className="reading-copy">Add the missing-address spreadsheet as an optional outside list under Sources first.</p>
       )}
