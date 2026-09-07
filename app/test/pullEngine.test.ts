@@ -409,6 +409,26 @@ test('planPullNewResidentsFromFolder: distinguishes a new resident at an existin
   assert.deepStrictEqual(plan.addresses[0].residents.map((resident) => resident.residentId), ['C1']);
 });
 
+test('planPullNewResidentsFromFolder: blocks the same situs under a different address_id', () => {
+  const master: Grid = [
+    ['address_id', 'resident_id', 'Resident Name', '_SitusHouseNo', '_SitusDirection', '_SitusStreet', '_SitusUnit'],
+    ['A1', 'M1', 'Existing Person', '5000', '', 'Rising Hill Rd', ''],
+  ];
+  const captain: Grid = [
+    ['address_id', 'resident_id', 'Resident Name', '_SitusHouseNo', '_SitusDirection', '_SitusStreet', '_SitusUnit'],
+    ['A2', 'C1', '', '5000', '', 'Rising Hill Rd', ''],
+  ];
+
+  const plan = planPullNewResidentsFromFolder(
+    master,
+    [{ spreadsheetId: 'S1', spreadsheetName: 'Zone 136', tabName: 'Sheet1', zone: 'Zone 136', grid: captain }],
+    { requiredColumns: [] }
+  );
+
+  assert.strictEqual(plan.addresses.length, 0);
+  assert.match(plan.blocked[0].reason, /already exists on the master as address_id A1/i);
+});
+
 test('planPullNewResidentsFromFolder: blocks duplicate identities across captain sheets', () => {
   const master: Grid = [['address_id', 'resident_id', 'Resident Name']];
   const first: Grid = [

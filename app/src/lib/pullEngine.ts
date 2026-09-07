@@ -555,6 +555,15 @@ export function planPullNewResidentsFromFolder(
   const masterAddressIds = new Set(
     masterGrid.slice(1).map((row) => identity(row?.[masterAddressCol])).filter(Boolean)
   );
+  const masterAddressIdsBySitus = new Map<string, Set<string>>();
+  for (const row of masterGrid.slice(1)) {
+    const addressId = identity(row?.[masterAddressCol]);
+    const situs = normalizedSitusKey(masterHeaders, row);
+    if (!addressId || !situs) continue;
+    const ids = masterAddressIdsBySitus.get(situs) || new Set<string>();
+    ids.add(addressId);
+    masterAddressIdsBySitus.set(situs, ids);
+  }
   const candidates: FolderNewResident[] = [];
   const occurrences = new Map<string, Array<{ addressId: string; spreadsheetId: string }>>();
   const droppedColumns = new Set<string>();
@@ -634,6 +643,10 @@ export function planPullNewResidentsFromFolder(
   for (const residents of byAddress.values()) {
     const addressId = residents[0].addressId;
     const residentIds = residents.map((resident) => resident.residentId);
+    const first = residents[0];
+    const matchingMasterAddressIds = masterAddressIdsBySitus.get(
+      normalizedSitusKey(masterHeaders, first.row)
+    );
     const duplicateIdentity = residents.find(
       (resident) => (occurrences.get(resident.residentId)?.length || 0) > 1
     );
@@ -644,6 +657,17 @@ export function planPullNewResidentsFromFolder(
       reason = `Resident ${duplicateIdentity.residentId} appears more than once in the captain folder.`;
     } else if (sourceIds.size > 1) {
       reason = 'Residents at this address appear on more than one captain sheet.';
+    } else if (
+      !masterAddressIds.has(addressId) &&
+      matchingMasterAddressIds &&
+      !matchingMasterAddressIds.has(addressId)
+    ) {
+      const matches = [...matchingMasterAddressIds].sort();
+      reason =
+        matches.length === 1
+          ? `${first.property || 'This address'} already exists on the master as address_id ${matches[0]}. ` +
+            `The captain row uses a different address_id and must be reconciled before import.`
+          : `${first.property || 'This address'} matches multiple master address IDs. Reconcile the duplicate addresses before import.`;
     } else if (residents.some((resident) => resident.missingRequired.length > 0)) {
       reason = 'At least one resident is missing a required field.';
     }
@@ -652,7 +676,6 @@ export function planPullNewResidentsFromFolder(
       continue;
     }
 
-    const first = residents[0];
     plan.addresses.push({
       addressId,
       displayAddress: first.property,
@@ -673,6 +696,15 @@ export function planPullNewResidentsFromFolder(
   plan.addresses.sort((a, b) => a.displayAddress.localeCompare(b.displayAddress) || a.addressId.localeCompare(b.addressId));
   plan.fingerprint = folderNewResidentsFingerprint(plan.addresses);
   return plan;
+}
+
+function normalizedSitusKey(headers: string[], row: CellValue[]): string {
+  const house = normalizeKey(columnReader(headers, '_SitusHouseNo', 'House')(row));
+  const direction = normalizeKey(columnReader(headers, '_SitusDirection')(row));
+  const street = normalizeKey(columnReader(headers, '_SitusStreet', 'Street')(row));
+  const unit = normalizeKey(columnReader(headers, '_SitusUnit')(row));
+  if (!house || !street) return '';
+  return [house, direction, street, unit].join('|');
 }
 
 export function folderNewResidentsFingerprint(addresses: FolderNewAddress[]): string {
