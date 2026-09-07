@@ -10,7 +10,8 @@ export default function registerRunRoutes(api: Router, { db }: Deps): void {
     res.json(
       db.all(
         `SELECT id, workflow_id, workflow_name, type, mode, status, actor,
-                summary_json, started_at, finished_at, created_at,
+                CASE WHEN mode='dry' THEN '{}' ELSE summary_json END AS summary_json,
+                started_at, finished_at, created_at,
                 (SELECT COUNT(*) FROM run_snapshots s WHERE s.run_id = runs.id) AS snapshot_count,
                 (SELECT COUNT(*) FROM run_snapshots s
                  WHERE s.run_id = runs.id AND s.operation = 'row_append'

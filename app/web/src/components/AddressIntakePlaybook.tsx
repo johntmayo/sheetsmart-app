@@ -257,6 +257,9 @@ export function AddressIntakePlaybook() {
                   {allVisibleSelected ? 'Clear' : 'Select first 250'}
                 </button>
               </div>
+              <p className="card-meta">
+                Each address-only row receives a normal unique resident ID. Its source capitalization is preserved.
+              </p>
               <div className="table-wrap">
                 <table className="data">
                   <thead>

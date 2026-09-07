@@ -213,6 +213,13 @@ interface ParsedAddress {
   latitude?: number;
   longitude?: number;
   normalizedSitus: string;
+  sourceHouse: string;
+  sourceDirection: string;
+  sourceStreet: string;
+  sourceUnit: string;
+  sourceCity: string;
+  sourceState: string;
+  sourceZip: string;
 }
 
 interface ExistingEntry extends ParsedAddress {
@@ -282,6 +289,13 @@ function parse(row: AddressRow, map: AddressHeaders): ParsedAddress {
     latitude: coordinate(row[map.latitude], -90, 90),
     longitude: coordinate(row[map.longitude], -180, 180),
     normalizedSitus: '',
+    sourceHouse: text(row[map.house]),
+    sourceDirection: text(row[map.direction]),
+    sourceStreet: text(row[map.street]),
+    sourceUnit: text(row[map.unit]),
+    sourceCity: text(row[map.city]),
+    sourceState: text(row[map.state]),
+    sourceZip: text(row[map.zip]),
   };
   // A partial address must not become an "exact" situs identity. It can still
   // participate in fuzzy review when callers relax requiredFields.
@@ -440,13 +454,13 @@ function placeholderFor(
     address_id: `${prefix}${fingerprint.slice(0, 20).toUpperCase()}`,
     record_type: 'address_placeholder',
     apn: input.apn,
-    house: input.house,
-    direction: input.direction,
-    street: input.street,
-    unit: input.unit,
-    city: input.city,
-    state: input.state,
-    zip: input.zip,
+    house: input.sourceHouse,
+    direction: input.sourceDirection,
+    street: input.sourceStreet,
+    unit: input.sourceUnit,
+    city: input.sourceCity,
+    state: input.sourceState,
+    zip: input.sourceZip,
     latitude: input.latitude ?? '',
     longitude: input.longitude ?? '',
     provenance_dataset: 'external',

@@ -432,13 +432,25 @@ function indexSheets(
     const markerCol = options.placeholderMarkerColumn
       ? headers.indexOf(options.placeholderMarkerColumn)
       : -1;
+    const personColumns = ['Resident Name', 'First Name', 'Middle Name', 'Last Name']
+      .map((header) => headers.indexOf(header))
+      .filter((index) => index !== -1);
     const markerValue = options.placeholderMarkerValue || DEFAULT_PLACEHOLDER_MARKER;
     for (let rowIndex = 1; rowIndex < sheet.grid.length; rowIndex++) {
       const row = sheet.grid[rowIndex] || [];
       const residentId = cleanIdentity(row[residentCol]);
       const addressId = cleanIdentity(row[addressCol]);
       const physicalMarker = markerCol !== -1 && String(row[markerCol] ?? '') === markerValue;
-      const markerResident = residentId === placeholderResidentId(addressId);
+      const legacyMarkerResident = residentId === `__address_placeholder__:${addressId}`;
+      const uuidResident = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+        residentId
+      );
+      const hasPersonName = personColumns.some((column) => Boolean(String(row[column] ?? '').trim()));
+      const unnamedAddressRecord =
+        Boolean(residentId) &&
+        personColumns.length > 0 &&
+        !hasPersonName &&
+        (uuidResident || physicalMarker || legacyMarkerResident);
       rows.push({
         sheet,
         headers,
@@ -446,7 +458,10 @@ function indexSheets(
         rowIndex,
         residentId,
         addressId,
-        placeholder: physicalMarker || markerResident,
+        placeholder:
+          personColumns.length > 0
+            ? unnamedAddressRecord
+            : physicalMarker || legacyMarkerResident,
       });
     }
   }
@@ -532,7 +547,11 @@ function makePlaceholder(
 }
 
 function placeholderResidentId(addressId: string): string {
-  return `__address_placeholder__:${addressId}`;
+  const chars = hash(`address-placeholder-resident:v1:${addressId}`).slice(0, 32).split('');
+  chars[12] = '5';
+  chars[16] = ((parseInt(chars[16], 16) & 0x3) | 0x8).toString(16);
+  const value = chars.join('');
+  return `${value.slice(0, 8)}-${value.slice(8, 12)}-${value.slice(12, 16)}-${value.slice(16, 20)}-${value.slice(20)}`;
 }
 
 function finalizePlan(

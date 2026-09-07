@@ -1,4 +1,5 @@
 import type { Request, Response, Router } from 'express';
+import { randomUUID } from 'node:crypto';
 import type { Deps } from '../types';
 import * as google from '../google';
 import * as jobs from '../jobs';
@@ -197,7 +198,7 @@ export default function registerAddressIntakeRoutes(api: Router, { db }: Deps): 
         }
         zoned.push({
           ...placeholder,
-          resident_id: `__address_placeholder__:${placeholder.address_id}`,
+          resident_id: randomUUID(),
           zoneFields: assignedZoneFields,
           captainSpreadsheetId,
           captainSpreadsheetName,

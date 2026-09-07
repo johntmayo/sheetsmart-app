@@ -514,6 +514,27 @@ test('produces explicit deterministic placeholders with provenance and bounded b
   );
 });
 
+test('preserves source capitalization in rows prepared for the master', () => {
+  const plan = planAddressIntake(
+    [
+      incoming({
+        House: '477',
+        Street: 'Fair Oaks Ave',
+        City: 'Altadena',
+        State: 'CA',
+        ZIP: '91001',
+      }),
+    ],
+    []
+  );
+
+  assert.strictEqual(plan.placeholders[0].house, '477');
+  assert.strictEqual(plan.placeholders[0].street, 'Fair Oaks Ave');
+  assert.strictEqual(plan.placeholders[0].city, 'Altadena');
+  assert.strictEqual(plan.placeholders[0].state, 'CA');
+  assert.strictEqual(plan.placeholders[0].zip, '91001');
+});
+
 test('fingerprints change with identity-affecting input and ignore blank external rows', () => {
   const base = planAddressIntake([incoming({ House: '30' }), {}], master);
   const changed = planAddressIntake([incoming({ House: '31' }), {}], master);

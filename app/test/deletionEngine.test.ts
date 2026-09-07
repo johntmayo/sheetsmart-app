@@ -45,11 +45,36 @@ test('person deletion creates an explicit deterministic placeholder for the last
   assert.strictEqual(first.placeholders.length, 1);
   assert.strictEqual(first.placeholders[0].kind, 'address_placeholder');
   assert.strictEqual(first.placeholders[0].addressId, 'A1');
-  assert.strictEqual(first.placeholders[0].row[1], '__address_placeholder__:A1');
+  assert.match(String(first.placeholders[0].row[1]), /^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
   assert.strictEqual(first.placeholders[0].row[4], '__SHEETSMART_ADDRESS_PLACEHOLDER__');
   assert.strictEqual(first.placeholders[0].marker, '__SHEETSMART_ADDRESS_PLACEHOLDER__');
   assert.deepStrictEqual(first.placeholders, second.placeholders);
   assert.deepStrictEqual(first.tombstones, [{ kind: 'resident', id: 'R1' }]);
+});
+
+test('an unnamed UUID row is a placeholder until a person name is supplied', () => {
+  const residentId = '91b6c1a3-d607-494f-94a2-3773f57285a1';
+  const unnamed = sheet('S1', 'North', [
+    HEADERS,
+    ['A1', residentId, '', 'Oak St', ''],
+  ]);
+  const placeholderPlan = planPersonDeletion([unnamed], residentId);
+  assert.strictEqual(placeholderPlan.deletions.length, 0);
+  assert.ok(placeholderPlan.blocked.some((item) => item.code === 'not_found'));
+
+  const named = sheet('S1', 'North', [
+    HEADERS,
+    ['A1', residentId, 'Ada Lovelace', 'Oak St', ''],
+  ]);
+  const personPlan = planPersonDeletion([named], residentId);
+  assert.strictEqual(personPlan.deletions.length, 1);
+  assert.strictEqual(personPlan.placeholders.length, 1);
+
+  const unnamedLegacyId = sheet('S1', 'North', [
+    HEADERS,
+    ['A1', 'R-LEGACY', '', 'Oak St', ''],
+  ]);
+  assert.strictEqual(planPersonDeletion([unnamedLegacyId], 'R-LEGACY').deletions.length, 1);
 });
 
 test('archive payload fingerprints ignore the reversible deletion marker', () => {
