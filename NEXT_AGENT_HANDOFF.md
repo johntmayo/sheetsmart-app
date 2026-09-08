@@ -115,6 +115,28 @@ After production acceptance, add progress feedback to long-running scans and liv
 - Do not use fake percentages that race ahead and then stall. Retain ordinary indeterminate loading indicators for short operations.
 - Progress polling should be infrequent and lightweight; Google API reads/writes, not UI polling, dominate runtime.
 
+## Deferred feature: Mapbox zone metadata audit
+
+After missing-address intake and the remaining reconciliation work are stable, add a folder-wide scan that compares zone-assignment columns in the master and captain sheets against current Mapbox polygon properties.
+
+**Mapbox is the source of truth** for:
+
+- Zone name
+- Captain name
+- Captain phone
+- Captain email
+
+SheetSmart already writes these from Mapbox during boundary reconciliation and address intake when a single safe zone match exists. Many spreadsheets still carry stale captain contact values from older manual edits.
+
+The future workflow should:
+
+1. Read current Mapbox zone properties for every zoned household in the master (and optionally captain sheets).
+2. Compare them to the sheet values for zone name, captain name, captain phone, and captain email.
+3. Present plain-English drift: which rows differ, what Mapbox says, what the sheet says.
+4. Offer an approval-gated, snapshotted, undoable apply that updates sheet values from Mapbox — same safety bar as other live writes.
+
+This is a **read/compare/report first** feature; live correction can follow once the preview UX is trustworthy. Do not build during bulk address intake unless the user explicitly reprioritizes it.
+
 ## Important implementation locations
 
 - `app/src/routes/addressIntake.routes.ts`
