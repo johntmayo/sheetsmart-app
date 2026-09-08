@@ -540,6 +540,7 @@ export interface FolderReconcilePreviewResponse {
 export interface CaptainImportResident {
   residentId: string;
   residentName: string;
+  addressPlaceholder: boolean;
   captainRow: number;
   property: string;
   risk: DuplicateRisk;
@@ -585,6 +586,7 @@ export interface CaptainImportPreviewResponse {
     newAddresses: number;
     existingAddresses: number;
     residents: number;
+    placeholders: number;
     safeAddresses?: number;
     safeResidents?: number;
     warnedAddresses: number;

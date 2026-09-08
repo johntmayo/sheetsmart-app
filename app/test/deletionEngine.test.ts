@@ -46,6 +46,7 @@ test('person deletion creates an explicit deterministic placeholder for the last
   assert.strictEqual(first.placeholders[0].kind, 'address_placeholder');
   assert.strictEqual(first.placeholders[0].addressId, 'A1');
   assert.match(String(first.placeholders[0].row[1]), /^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+  assert.strictEqual(first.placeholders[0].row[2], 'Placeholder Resident');
   assert.strictEqual(first.placeholders[0].row[4], '__SHEETSMART_ADDRESS_PLACEHOLDER__');
   assert.strictEqual(first.placeholders[0].marker, '__SHEETSMART_ADDRESS_PLACEHOLDER__');
   assert.deepStrictEqual(first.placeholders, second.placeholders);
@@ -75,6 +76,66 @@ test('an unnamed UUID row is a placeholder until a person name is supplied', () 
     ['A1', 'R-LEGACY', '', 'Oak St', ''],
   ]);
   assert.strictEqual(planPersonDeletion([unnamedLegacyId], 'R-LEGACY').deletions.length, 1);
+});
+
+test('uses the Address Placeholder boolean for Dashboard-compatible placeholder rows', () => {
+  const headers = [...HEADERS, 'Address Placeholder'];
+  const placeholderId = '91b6c1a3-d607-494f-94a2-3773f57285a1';
+  const source = sheet('S1', 'North', [
+    headers,
+    ['A1', placeholderId, 'Placeholder Resident', 'Oak St', '', true],
+  ]);
+  const options = {
+    placeholderMarkerColumn: 'Address Placeholder',
+    placeholderMarkerValue: 'TRUE',
+  };
+  const placeholderPlan = planPersonDeletion([source], placeholderId, options);
+  assert.strictEqual(placeholderPlan.deletions.length, 0);
+
+  const inconsistentPlaceholder = sheet('S1', 'North', [
+    headers,
+    ['A1', placeholderId, 'Unexpected Name', 'Oak St', '', true],
+  ]);
+  assert.strictEqual(planPersonDeletion([inconsistentPlaceholder], placeholderId, options).deletions.length, 0);
+
+  const realPerson = sheet('S1', 'North', [
+    headers,
+    ['A1', placeholderId, 'Ada Lovelace', 'Oak St', '', false],
+  ]);
+  const personPlan = planPersonDeletion([realPerson], placeholderId, options);
+  assert.strictEqual(personPlan.deletions.length, 1);
+  assert.strictEqual(personPlan.placeholders[0].row[2], 'Placeholder Resident');
+  assert.strictEqual(personPlan.placeholders[0].row[5], true);
+  assert.notStrictEqual(personPlan.placeholders[0].row[1], placeholderId);
+});
+
+test('previously soft-deleted residents do not keep an address falsely occupied', () => {
+  const headers = [...HEADERS, 'Address Placeholder', 'Deleted Record'];
+  const source = sheet('S1', 'North', [
+    headers,
+    ['A1', 'R1', 'Former Person', 'Oak St', '', false, 'older-operation'],
+    ['A1', 'R2', 'Current Person', 'Oak St', '', false, ''],
+  ]);
+  const options = {
+    placeholderMarkerColumn: 'Address Placeholder',
+    placeholderMarkerValue: 'TRUE',
+  };
+
+  const plan = planPersonDeletion([source], 'R2', options);
+  assert.deepStrictEqual(plan.deletions.map((item) => item.residentId), ['R2']);
+  assert.strictEqual(plan.placeholders.length, 1);
+
+  const interruptedRetry = sheet('S1', 'North', [
+    headers,
+    ['A1', 'R1', 'Former Person', 'Oak St', '', false, 'older-operation'],
+    ['A1', 'R2', 'Current Person', 'Oak St', '', false, 'current-operation'],
+  ]);
+  const retryPlan = planPersonDeletion([interruptedRetry], 'R2', {
+    ...options,
+    currentDeletionOperationId: 'current-operation',
+  });
+  assert.deepStrictEqual(retryPlan.deletions.map((item) => item.residentId), ['R2']);
+  assert.strictEqual(retryPlan.placeholders.length, 1);
 });
 
 test('archive payload fingerprints ignore the reversible deletion marker', () => {

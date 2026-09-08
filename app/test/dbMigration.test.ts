@@ -47,6 +47,7 @@ test('existing dictionaries migrate safely and mark sales fields master-only', a
   approvedBooleans.forEach((field, index) => insert.run(field, salesFields.length + index + 1));
   insert.run('House', salesFields.length + approvedBooleans.length + 1);
   insert.run('Street', salesFields.length + approvedBooleans.length + 2);
+  insert.run('Address Placeholder', salesFields.length + approvedBooleans.length + 3);
   legacy.close();
 
   process.env.DATABASE_PATH = databasePath;
@@ -72,6 +73,19 @@ test('existing dictionaries migrate safely and mark sales fields master-only', a
     .all(...approvedBooleans) as Array<{ canonical_name: string; data_type: string }>;
   assert.strictEqual(typed.length, approvedBooleans.length);
   assert.ok(typed.every((field) => field.data_type === 'checkbox'));
+  assert.deepStrictEqual(
+    migrated.find((field) => field.canonical_name === 'Address Placeholder'),
+    {
+      canonical_name: 'Address Placeholder',
+      distribute_to_captain: 1,
+      default_policy: 'fill_blank',
+      notes: '',
+    }
+  );
+  const placeholderType = connection
+    .prepare("SELECT data_type FROM dictionary_fields WHERE canonical_name='Address Placeholder'")
+    .get() as { data_type: string };
+  assert.strictEqual(placeholderType.data_type, 'checkbox');
   assert.strictEqual(migrated.find((field) => field.canonical_name === 'House')?.distribute_to_captain, 0);
   assert.strictEqual(migrated.find((field) => field.canonical_name === 'Street')?.distribute_to_captain, 0);
   for (const table of [

@@ -258,7 +258,8 @@ export function AddressIntakePlaybook() {
                 </button>
               </div>
               <p className="card-meta">
-                Each address-only row receives a normal unique resident ID. Its source capitalization is preserved.
+                Each address-only row receives a normal unique resident ID, the name “Placeholder Resident,” and an
+                Address Placeholder value of TRUE. Its source capitalization is preserved.
               </p>
               <div className="table-wrap">
                 <table className="data">

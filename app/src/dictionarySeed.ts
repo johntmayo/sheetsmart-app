@@ -41,6 +41,7 @@ export interface SeedField {
 
 const IDENTITY = new Set(['resident_id']);
 export const APPROVED_BOOLEAN_FIELDS = [
+  'Address Placeholder',
   'Wants_Updates',
   'Former Resident',
   'Deceased',
@@ -103,7 +104,7 @@ const EXTRA_ALIASES: Record<string, string[]> = {
 export const MASTER_FIELDS: string[] = [
   '_Sort Order', 'address_id', '_SitusHouseNo', '_SitusDirection', '_SitusStreet',
   '_SitusUnit', 'House', 'Street', 'City', 'State', 'Zip', 'Latitude', 'Longitude',
-  'APN', 'resident_id', 'Resident Name', 'First Name', 'Middle Name', 'Last Name',
+  'APN', 'resident_id', 'Resident Name', 'Address Placeholder', 'First Name', 'Middle Name', 'Last Name',
   'Age', 'Gender', 'Home Phone', 'Cell', 'Email', 'Damage', 'Address Plan',
   'Build Status', 'Person - Renter', 'Person - Needs Follow-Up',
   'Person - Unable to Reach', 'Person Notes', 'Last Outreach Attempt Date',

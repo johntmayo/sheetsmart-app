@@ -8,6 +8,11 @@
 import { createHash } from 'node:crypto';
 import type { Grid } from './mergeEngine';
 import type { CellValue } from './values';
+import {
+  ADDRESS_PLACEHOLDER_NAME,
+  isAddressPlaceholderName,
+  isAddressPlaceholderValue,
+} from './addressPlaceholder';
 
 export type DeletionKind = 'person' | 'address';
 
@@ -28,6 +33,8 @@ export interface DeletionPlannerOptions {
    */
   placeholderMarkerColumn?: string;
   placeholderMarkerValue?: string;
+  /** Include rows already soft-deleted by this same operation when safely retrying it. */
+  currentDeletionOperationId?: string;
 }
 
 export interface ArchivedDeletionRow {
@@ -104,6 +111,7 @@ interface IndexedRow {
   residentId: string;
   addressId: string;
   placeholder: boolean;
+  softDeleted: boolean;
 }
 
 const DEFAULT_PLACEHOLDER_MARKER = '__SHEETSMART_ADDRESS_PLACEHOLDER__';
@@ -165,6 +173,7 @@ export function planPersonDeletion(
       (entry) =>
         sheetIdentity(entry) === sheetKey &&
         entry.addressId === addressId &&
+        !entry.softDeleted &&
         !entry.placeholder &&
         Boolean(entry.residentId) &&
         entry.residentId !== targetId
@@ -174,7 +183,7 @@ export function planPersonDeletion(
         sheetIdentity(entry) === sheetKey && entry.addressId === addressId && entry.placeholder
     );
     if (!realPeopleRemaining && !placeholderAlreadyExists) {
-      placeholders.push(makePlaceholder(exemplar.sheet, exemplar.headers, addressId, options));
+      placeholders.push(makePlaceholder(exemplar.sheet, exemplar.headers, addressId, targetId, options));
     }
   }
 
@@ -432,25 +441,52 @@ function indexSheets(
     const markerCol = options.placeholderMarkerColumn
       ? headers.indexOf(options.placeholderMarkerColumn)
       : -1;
+    if (options.placeholderMarkerColumn && markerCol === -1) {
+      blocks.push({
+        code: 'missing_column',
+        message: `${sheet.spreadsheetName || sheet.spreadsheetId}/${sheet.tabName} is missing ${
+          options.placeholderMarkerColumn
+        }.`,
+        spreadsheetId: sheet.spreadsheetId,
+        tabName: sheet.tabName,
+      });
+      continue;
+    }
     const personColumns = ['Resident Name', 'First Name', 'Middle Name', 'Last Name']
       .map((header) => headers.indexOf(header))
       .filter((index) => index !== -1);
+    const residentNameCol = headers.indexOf('Resident Name');
+    const deletedCol = headers.indexOf('Deleted Record');
     const markerValue = options.placeholderMarkerValue || DEFAULT_PLACEHOLDER_MARKER;
     for (let rowIndex = 1; rowIndex < sheet.grid.length; rowIndex++) {
       const row = sheet.grid[rowIndex] || [];
+      const deletionMarker = deletedCol === -1 ? '' : String(row[deletedCol] ?? '').trim();
+      if (deletionMarker && deletionMarker !== options.currentDeletionOperationId) continue;
       const residentId = cleanIdentity(row[residentCol]);
       const addressId = cleanIdentity(row[addressCol]);
-      const physicalMarker = markerCol !== -1 && String(row[markerCol] ?? '') === markerValue;
+      const physicalMarker =
+        markerCol !== -1 &&
+        (markerValue.toUpperCase() === 'TRUE'
+          ? isAddressPlaceholderValue(row[markerCol])
+          : String(row[markerCol] ?? '') === markerValue);
       const legacyMarkerResident = residentId === `__address_placeholder__:${addressId}`;
       const uuidResident = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
         residentId
       );
-      const hasPersonName = personColumns.some((column) => Boolean(String(row[column] ?? '').trim()));
+      const placeholderDisplayName =
+        residentNameCol !== -1 &&
+        isAddressPlaceholderName(row[residentNameCol]) &&
+        personColumns.every(
+          (column) => column === residentNameCol || !String(row[column] ?? '').trim()
+        );
+      const hasPersonName =
+        !placeholderDisplayName &&
+        personColumns.some((column) => Boolean(String(row[column] ?? '').trim()));
       const unnamedAddressRecord =
         Boolean(residentId) &&
         personColumns.length > 0 &&
         !hasPersonName &&
-        (uuidResident || physicalMarker || legacyMarkerResident);
+        (uuidResident || physicalMarker || legacyMarkerResident || placeholderDisplayName);
       rows.push({
         sheet,
         headers,
@@ -459,9 +495,11 @@ function indexSheets(
         residentId,
         addressId,
         placeholder:
-          personColumns.length > 0
+          physicalMarker ||
+          (personColumns.length > 0
             ? unnamedAddressRecord
-            : physicalMarker || legacyMarkerResident,
+            : legacyMarkerResident),
+        softDeleted: Boolean(deletionMarker),
       });
     }
   }
@@ -521,6 +559,7 @@ function makePlaceholder(
   sheet: DeletionSheet,
   headers: string[],
   addressId: string,
+  replacedResidentId: string,
   options: DeletionPlannerOptions
 ): PlaceholderRow {
   const residentColumn = options.residentColumn || 'resident_id';
@@ -529,10 +568,12 @@ function makePlaceholder(
   const row: CellValue[] = headers.map(() => '');
   row[headers.indexOf(addressColumn)] = addressId;
   const residentCol = headers.indexOf(residentColumn);
-  if (residentCol !== -1) row[residentCol] = placeholderResidentId(addressId);
+  if (residentCol !== -1) row[residentCol] = placeholderResidentId(addressId, replacedResidentId);
+  const residentNameCol = headers.indexOf('Resident Name');
+  if (residentNameCol !== -1) row[residentNameCol] = ADDRESS_PLACEHOLDER_NAME;
   if (options.placeholderMarkerColumn) {
     const markerCol = headers.indexOf(options.placeholderMarkerColumn);
-    if (markerCol !== -1) row[markerCol] = marker;
+    if (markerCol !== -1) row[markerCol] = marker.toUpperCase() === 'TRUE' ? true : marker;
   }
   return {
     kind: 'address_placeholder',
@@ -546,8 +587,8 @@ function makePlaceholder(
   };
 }
 
-function placeholderResidentId(addressId: string): string {
-  const chars = hash(`address-placeholder-resident:v1:${addressId}`).slice(0, 32).split('');
+function placeholderResidentId(addressId: string, replacedResidentId: string): string {
+  const chars = hash(`address-placeholder-resident:v2:${addressId}:${replacedResidentId}`).slice(0, 32).split('');
   chars[12] = '5';
   chars[16] = ((parseInt(chars[16], 16) & 0x3) | 0x8).toString(16);
   const value = chars.join('');

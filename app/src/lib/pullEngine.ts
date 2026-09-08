@@ -17,6 +17,12 @@ import { trimHeaders, type Grid } from './mergeEngine';
 import { isZoneDashboardSalesField } from './salesFieldPolicy';
 import { decideWrite, normalizePolicy, type Policy } from './writeGuard';
 import {
+  ADDRESS_PLACEHOLDER_COLUMN,
+  ADDRESS_PLACEHOLDER_NAME,
+  isAddressPlaceholderName,
+  isAddressPlaceholderValue,
+} from './addressPlaceholder';
+import {
   type CellValue,
   type FieldCompareMeta,
   type FieldMetaMap,
@@ -265,6 +271,7 @@ export type DuplicateRisk = 'likely' | 'possible' | 'none';
 export interface NewResidentCandidate {
   residentId: string;
   residentName: string;
+  addressPlaceholder: boolean;
   captainRow: number;
   /** Values ordered to match the master's headers, ready to append. */
   row: CellValue[];
@@ -352,12 +359,14 @@ export function planPullNewResidents(
   const masterName = columnReader(masterHeaders, nameColumn);
   const masterApn = columnReader(masterHeaders, apnColumn);
   const masterEmail = columnReader(masterHeaders, emailColumn);
+  const masterPlaceholder = columnReader(masterHeaders, ADDRESS_PLACEHOLDER_COLUMN);
 
   for (let row = 1; row < masterGrid.length; row++) {
     const cells = masterGrid[row] || [];
     const residentId = identity(cells[masterIdCol]);
     if (!residentId) continue;
     masterIds.add(residentId);
+    if (isAddressPlaceholderValue(masterPlaceholder(cells))) continue;
     const name = normalizeKey(masterName(cells));
     const apn = normalizeKey(masterApn(cells));
     const email = normalizeKey(masterEmail(cells));
@@ -371,6 +380,7 @@ export function planPullNewResidents(
   const captainName = columnReader(captainHeaders, nameColumn);
   const captainApn = columnReader(captainHeaders, apnColumn);
   const captainEmail = columnReader(captainHeaders, emailColumn);
+  const captainPlaceholder = columnReader(captainHeaders, ADDRESS_PLACEHOLDER_COLUMN);
   const houseReader = columnReader(captainHeaders, '_SitusHouseNo', 'House');
   const streetReader = columnReader(captainHeaders, '_SitusStreet', 'Street');
 
@@ -405,6 +415,8 @@ export function planPullNewResidents(
     seenIds.add(residentId);
 
     const name = text(captainName(cells));
+    const addressPlaceholder =
+      isAddressPlaceholderValue(captainPlaceholder(cells)) || isAddressPlaceholderName(name);
     const nameKey = normalizeKey(name);
     const apnKey = normalizeKey(captainApn(cells));
     const emailKey = normalizeKey(captainEmail(cells));
@@ -414,38 +426,57 @@ export function planPullNewResidents(
     let matchedResidentId = '';
     const nameAndParcel = nameKey && apnKey ? `${nameKey}|${apnKey}` : '';
 
-    if (nameAndParcel && masterByNameAndParcel.has(nameAndParcel)) {
+    if (!addressPlaceholder && nameAndParcel && masterByNameAndParcel.has(nameAndParcel)) {
       risk = 'likely';
       matchedResidentId = masterByNameAndParcel.get(nameAndParcel)!;
       riskReason = 'The master already has this name at this same parcel, under a different resident_id.';
-    } else if (emailKey && masterByEmail.has(emailKey)) {
+    } else if (!addressPlaceholder && emailKey && masterByEmail.has(emailKey)) {
       risk = 'likely';
       matchedResidentId = masterByEmail.get(emailKey)!;
       riskReason = 'The master already has this email address, under a different resident_id.';
-    } else if (nameAndParcel && batchByNameAndParcel.has(nameAndParcel)) {
+    } else if (!addressPlaceholder && nameAndParcel && batchByNameAndParcel.has(nameAndParcel)) {
       risk = 'likely';
       matchedResidentId = batchByNameAndParcel.get(nameAndParcel)!;
       riskReason = 'Another row in this same batch has this name at this parcel.';
-    } else if (emailKey && batchByEmail.has(emailKey)) {
+    } else if (!addressPlaceholder && emailKey && batchByEmail.has(emailKey)) {
       risk = 'likely';
       matchedResidentId = batchByEmail.get(emailKey)!;
       riskReason = 'Another row in this same batch has this email address.';
-    } else if (nameKey && masterByName.has(nameKey)) {
+    } else if (!addressPlaceholder && nameKey && masterByName.has(nameKey)) {
       risk = 'possible';
       matchedResidentId = masterByName.get(nameKey)!;
       riskReason = 'Someone with this name is already on the master, but at a different parcel.';
     }
 
-    if (nameAndParcel && !batchByNameAndParcel.has(nameAndParcel)) {
+    if (!addressPlaceholder && nameAndParcel && !batchByNameAndParcel.has(nameAndParcel)) {
       batchByNameAndParcel.set(nameAndParcel, residentId);
     }
-    if (emailKey && !batchByEmail.has(emailKey)) batchByEmail.set(emailKey, residentId);
+    if (!addressPlaceholder && emailKey && !batchByEmail.has(emailKey)) {
+      batchByEmail.set(emailKey, residentId);
+    }
 
     const mapped = remapToMasterHeaders(cells, captainHeaders, masterHeaders, options.forbiddenColumns);
+    const mappedPlaceholderCol = masterHeaders.indexOf(ADDRESS_PLACEHOLDER_COLUMN);
+    if (mappedPlaceholderCol !== -1) mapped[mappedPlaceholderCol] = addressPlaceholder;
+    const mappedNameCol = masterHeaders.indexOf(nameColumn);
+    if (addressPlaceholder && mappedNameCol !== -1 && isAddressPlaceholderName(name)) {
+      mapped[mappedNameCol] = ADDRESS_PLACEHOLDER_NAME;
+    }
     const missingRequired = requiredColumns.filter((column) => {
       const index = masterHeaders.indexOf(column);
       return index === -1 || text(mapped[index]) === '';
     });
+    if (addressPlaceholder) {
+      for (const column of [nameColumn, ADDRESS_PLACEHOLDER_COLUMN]) {
+        const index = masterHeaders.indexOf(column);
+        if ((index === -1 || text(mapped[index]) === '') && !missingRequired.includes(column)) {
+          missingRequired.push(column);
+        }
+      }
+      if (!isAddressPlaceholderName(name) && !missingRequired.includes(nameColumn)) {
+        missingRequired.push(nameColumn);
+      }
+    }
     const house = text(houseReader(cells));
     const street = text(streetReader(cells));
     const apn = text(captainApn(cells));
@@ -453,6 +484,7 @@ export function planPullNewResidents(
     plan.candidates.push({
       residentId,
       residentName: name,
+      addressPlaceholder,
       captainRow: row + 1,
       row: mapped,
       property: [`${house} ${street}`.trim(), apn ? `APN ${apn}` : ''].filter(Boolean).join(' · '),
@@ -628,6 +660,7 @@ export function planPullNewResidentsFromFolder(
   const seenNameAtAddress = new Map<string, string>();
   const seenEmail = new Map<string, string>();
   for (const candidate of candidates) {
+    if (candidate.addressPlaceholder) continue;
     const name = nameCol === -1 ? '' : normalizeKey(candidate.row[nameCol]);
     const email = emailCol === -1 ? '' : normalizeKey(candidate.row[emailCol]);
     const personAtAddress = name && candidate.addressId ? `${name}|${normalizeKey(candidate.addressId)}` : '';
@@ -645,7 +678,25 @@ export function planPullNewResidentsFromFolder(
   }
 
   const byAddress = new Map<string, FolderNewResident[]>();
+  const addressesWithRealCandidates = new Set(
+    candidates
+      .filter((candidate) => !candidate.addressPlaceholder && candidate.addressId)
+      .map((candidate) => candidate.addressId)
+  );
   for (const candidate of candidates) {
+    if (
+      candidate.addressPlaceholder &&
+      candidate.addressId &&
+      (masterAddressIds.has(candidate.addressId) || addressesWithRealCandidates.has(candidate.addressId))
+    ) {
+      plan.skipped.push({
+        residentId: candidate.residentId,
+        column: ADDRESS_PLACEHOLDER_COLUMN,
+        reason: 'This address already has a master row or a real new resident, so its extra placeholder was not imported.',
+        spreadsheetName: candidate.sourceSpreadsheetName,
+      });
+      continue;
+    }
     const key = candidate.addressId || `__missing__:${candidate.sourceSpreadsheetId}:${candidate.residentId}`;
     const group = byAddress.get(key) || [];
     group.push(candidate);
@@ -662,6 +713,10 @@ export function planPullNewResidentsFromFolder(
     const duplicateIdentity = residents.find(
       (resident) => (occurrences.get(resident.residentId)?.length || 0) > 1
     );
+    const duplicatePlaceholders = residents.filter((resident) => resident.addressPlaceholder);
+    const invalidPlaceholder = duplicatePlaceholders.find(
+      (resident) => !isAddressPlaceholderName(resident.residentName)
+    );
     const sourceIds = new Set(residents.map((resident) => resident.sourceSpreadsheetId));
     let reason = '';
     let code: FolderPullBlock['code'] = 'missing_required_field';
@@ -673,6 +728,9 @@ export function planPullNewResidentsFromFolder(
     else if (duplicateIdentity) {
       code = 'duplicate_resident';
       reason = `Resident ${duplicateIdentity.residentId} appears more than once in the captain folder.`;
+    } else if (duplicatePlaceholders.length > 1) {
+      code = 'duplicate_resident';
+      reason = 'This new address has more than one placeholder row. Keep one placeholder before importing it.';
     } else if (sourceIds.size > 1) {
       code = 'split_across_sheets';
       reason = 'Residents at this address appear on more than one captain sheet.';
@@ -689,6 +747,9 @@ export function planPullNewResidentsFromFolder(
           ? `${first.property || 'This address'} already exists on the master as address_id ${matches[0]}. ` +
             `The captain row uses a different address_id and must be reconciled before import.`
           : `${first.property || 'This address'} matches multiple master address IDs. Reconcile the duplicate addresses before import.`;
+    } else if (invalidPlaceholder) {
+      code = 'missing_required_field';
+      reason = 'Address Placeholder is TRUE, but Resident Name is not exactly "Placeholder Resident".';
     } else if (residents.some((resident) => resident.missingRequired.length > 0)) {
       code = 'missing_required_field';
       reason = 'At least one resident is missing a required field.';

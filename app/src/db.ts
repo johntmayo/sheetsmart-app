@@ -315,7 +315,9 @@ export function init(): Database.Database {
   backfillPreviewClaims();
 
   seedDictionaryIfEmpty();
-  ensureDeletionMarkerField();
+  ensureSeedField('Deleted Record');
+  ensureSeedField('Address Placeholder');
+  enforceAddressPlaceholderField();
   applySalesOwnershipLock();
   applyAddressDistributionScopeV2();
   applyPrivacyClassificationV1();
@@ -341,11 +343,11 @@ export function zoneDashboardSalesHeaders(): string[] {
   return rows.map((row) => row.name);
 }
 
-function ensureDeletionMarkerField(): void {
+function ensureSeedField(canonicalName: string): void {
   const conn = getDb();
-  if (conn.prepare("SELECT id FROM dictionary_fields WHERE canonical_name='Deleted Record'").get()) return;
-  const field = buildSeed().find((item) => item.canonical_name === 'Deleted Record');
-  if (!field) throw new Error('Deleted Record dictionary seed is missing.');
+  if (conn.prepare('SELECT id FROM dictionary_fields WHERE canonical_name=?').get(canonicalName)) return;
+  const field = buildSeed().find((item) => item.canonical_name === canonicalName);
+  if (!field) throw new Error(`${canonicalName} dictionary seed is missing.`);
   const { aliases, ...row } = field;
   const info = conn
     .prepare(
@@ -359,6 +361,16 @@ function ensureDeletionMarkerField(): void {
   for (const alias of aliases) {
     conn.prepare('INSERT INTO dictionary_aliases (field_id, alias) VALUES (?, ?)').run(info.lastInsertRowid, alias);
   }
+}
+
+function enforceAddressPlaceholderField(): void {
+  getDb()
+    .prepare(
+      `UPDATE dictionary_fields
+       SET data_type='checkbox', distribute_to_captain=1
+       WHERE canonical_name='Address Placeholder'`
+    )
+    .run();
 }
 
 function backfillPreviewClaims(): void {

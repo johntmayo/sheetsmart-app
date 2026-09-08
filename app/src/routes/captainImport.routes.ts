@@ -128,7 +128,14 @@ export default function registerCaptainImportRoutes(api: Router, { db }: Deps): 
         requiredColumns: [],
         forbiddenColumns: appDb.zoneDashboardSalesHeaders(),
       });
-      const residents = plan.addresses.reduce((sum, address) => sum + address.residents.length, 0);
+      const residents = plan.addresses.reduce(
+        (sum, address) => sum + address.residents.filter((resident) => !resident.addressPlaceholder).length,
+        0
+      );
+      const placeholders = plan.addresses.reduce(
+        (sum, address) => sum + address.residents.filter((resident) => resident.addressPlaceholder).length,
+        0
+      );
       const warnedAddresses = plan.addresses.filter((address) => address.risk !== 'none');
       const safeAddresses = plan.addresses.filter((address) => address.risk === 'none');
       const summary: StoredPreview = {
@@ -151,10 +158,17 @@ export default function registerCaptainImportRoutes(api: Router, { db }: Deps): 
           newAddresses: plan.addresses.filter((address) => address.kind === 'new_address').length,
           existingAddresses: plan.addresses.filter((address) => address.kind === 'existing_address').length,
           residents,
+          placeholders,
           safeAddresses: safeAddresses.length,
-          safeResidents: safeAddresses.reduce((sum, address) => sum + address.residents.length, 0),
+          safeResidents: safeAddresses.reduce(
+            (sum, address) => sum + address.residents.filter((resident) => !resident.addressPlaceholder).length,
+            0
+          ),
           warnedAddresses: warnedAddresses.length,
-          warnedResidents: warnedAddresses.reduce((sum, address) => sum + address.residents.length, 0),
+          warnedResidents: warnedAddresses.reduce(
+            (sum, address) => sum + address.residents.filter((resident) => !resident.addressPlaceholder).length,
+            0
+          ),
           blockedAddresses: plan.blocked.length,
           sheetsScanned: captainSheets.length,
           readErrors: readErrors.length,

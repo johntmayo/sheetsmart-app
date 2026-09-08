@@ -80,6 +80,17 @@ import {
   type AddressRow,
 } from './lib/addressIntakeEngine';
 import { buildSpatialIndex, findContainingFeatures, ZONE_OUTPUT_FIELDS } from './lib/zoneEngine';
+import {
+  ADDRESS_PLACEHOLDER_COLUMN,
+  ADDRESS_PLACEHOLDER_NAME,
+  isAddressPlaceholderName,
+  isAddressPlaceholderValue,
+} from './lib/addressPlaceholder';
+
+const ADDRESS_PLACEHOLDER_OPTIONS = {
+  placeholderMarkerColumn: ADDRESS_PLACEHOLDER_COLUMN,
+  placeholderMarkerValue: 'TRUE',
+};
 
 export const PUSH_MISSING_COPY_TASK = 'push_missing_copy';
 export const REVERT_APPEND_COPY_TASK = 'revert_append_copy';
@@ -693,11 +704,42 @@ async function pullToMasterCopy(ctx: JobContext): Promise<unknown> {
  */
 async function applyConflictCopy(ctx: JobContext): Promise<unknown> {
   requireLive(ctx);
-  const conflictIds = Array.isArray(ctx.params.conflictIds)
+  let conflictIds = Array.isArray(ctx.params.conflictIds)
     ? ctx.params.conflictIds.map((id) => Number(id)).filter((id) => Number.isInteger(id) && id > 0)
     : [];
   if (conflictIds.length === 0) throw new Error('No conflicts were selected.');
 
+  const requestedPlaceholders = conflictIds.map(() => '?').join(',');
+  const requested = db.all<ConflictRow>(
+    `SELECT id, status, "column", resident_id, existing_value, incoming_value, context_json
+     FROM conflicts WHERE id IN (${requestedPlaceholders}) AND status='open'`,
+    conflictIds
+  );
+  const expandedIds = new Set(conflictIds);
+  for (const conflict of requested) {
+    if (!['Resident Name', ADDRESS_PLACEHOLDER_COLUMN].includes(conflict.column)) continue;
+    const context = parseConflictContext(conflict.context_json);
+    if (!context) continue;
+    const companions = db.all<ConflictRow>(
+      `SELECT id, status, "column", resident_id, existing_value, incoming_value, context_json
+       FROM conflicts
+       WHERE status='open' AND resident_id=? AND "column" IN ('Resident Name', 'Address Placeholder')`,
+      [conflict.resident_id]
+    );
+    for (const companion of companions) {
+      const companionContext = parseConflictContext(companion.context_json);
+      if (
+        companionContext &&
+        companionContext.spreadsheetId === context.spreadsheetId &&
+        companionContext.tabName === context.tabName &&
+        companionContext.sourceSpreadsheetId === context.sourceSpreadsheetId &&
+        companionContext.sourceTab === context.sourceTab
+      ) {
+        expandedIds.add(companion.id);
+      }
+    }
+  }
+  conflictIds = [...expandedIds];
   const placeholders = conflictIds.map(() => '?').join(',');
   const conflicts = db.all<ConflictRow>(
     `SELECT id, status, "column", resident_id, existing_value, incoming_value, context_json
@@ -823,6 +865,64 @@ async function applyConflictCopy(ctx: JobContext): Promise<unknown> {
         continue;
       }
       applicable.push({ conflict, value: currentSource, fieldMeta });
+    }
+    const masterNameCol = headers.indexOf('Resident Name');
+    const masterPlaceholderCol = headers.indexOf(ADDRESS_PLACEHOLDER_COLUMN);
+    const sourceNameCol = sourceHeaders.indexOf('Resident Name');
+    const sourcePlaceholderCol = sourceHeaders.indexOf(ADDRESS_PLACEHOLDER_COLUMN);
+    if (
+      masterNameCol !== -1 &&
+      masterPlaceholderCol !== -1 &&
+      sourceNameCol !== -1 &&
+      sourcePlaceholderCol !== -1
+    ) {
+      for (const residentId of new Set(group.rows.map((row) => row.resident_id))) {
+        const masterRow = findRowByResidentId(grid, headers, residentId);
+        const sourceRow = findRowByResidentId(sourceGrid, sourceHeaders, residentId);
+        if (masterRow === -1 || sourceRow === -1) continue;
+        const convertingPlaceholder =
+          isAddressPlaceholderValue(grid[masterRow]?.[masterPlaceholderCol]) &&
+          isAddressPlaceholderName(grid[masterRow]?.[masterNameCol]) &&
+          !isAddressPlaceholderValue(sourceGrid[sourceRow]?.[sourcePlaceholderCol]) &&
+          Boolean(String(sourceGrid[sourceRow]?.[sourceNameCol] ?? '').trim()) &&
+          !isAddressPlaceholderName(sourceGrid[sourceRow]?.[sourceNameCol]);
+        if (!convertingPlaceholder) continue;
+        const conversionWrites = applicable.filter(
+          ({ conflict }) =>
+            conflict.resident_id === residentId &&
+            ['Resident Name', ADDRESS_PLACEHOLDER_COLUMN].includes(
+              parseConflictContext(conflict.context_json)?.column || conflict.column
+            )
+        );
+        const conversionColumns = new Set(
+          conversionWrites.map(
+            ({ conflict }) => parseConflictContext(conflict.context_json)?.column || conflict.column
+          )
+        );
+        if (
+          conversionColumns.has('Resident Name') &&
+          conversionColumns.has(ADDRESS_PLACEHOLDER_COLUMN)
+        ) {
+          continue;
+        }
+        for (let index = applicable.length - 1; index >= 0; index--) {
+          const conflict = applicable[index].conflict;
+          const column = parseConflictContext(conflict.context_json)?.column || conflict.column;
+          if (
+            conflict.resident_id === residentId &&
+            ['Resident Name', ADDRESS_PLACEHOLDER_COLUMN].includes(column)
+          ) {
+            applicable.splice(index, 1);
+          }
+        }
+        skipped++;
+        ctx.log({
+          spreadsheet: context.spreadsheetName,
+          resident_id: residentId,
+          type: 'conflict',
+          message: 'Placeholder conversion was left unchanged because its name and placeholder flag must be applied together.',
+        });
+      }
     }
     if (applicable.length === 0) continue;
 
@@ -2253,8 +2353,14 @@ async function applyDashboardDeletion(ctx: JobContext): Promise<unknown> {
   ];
   const plan =
     operation.action === 'delete_address'
-      ? planAddressDeletion(sheets, operation.address_id)
-      : planPersonDeletion(sheets, residentIds[0]);
+      ? planAddressDeletion(sheets, operation.address_id, {
+          ...ADDRESS_PLACEHOLDER_OPTIONS,
+          currentDeletionOperationId: operation.operation_id,
+        })
+      : planPersonDeletion(sheets, residentIds[0], {
+          ...ADDRESS_PLACEHOLDER_OPTIONS,
+          currentDeletionOperationId: operation.operation_id,
+        });
   const meaningfulBlocks = plan.blocked.filter((block) => block.code !== 'not_found');
   if (meaningfulBlocks.length > 0) {
     throw new Error(meaningfulBlocks.map((block) => block.message).join(' '));
@@ -2460,8 +2566,14 @@ async function applyDashboardDeletion(ctx: JobContext): Promise<unknown> {
     };
     const refreshed =
       operation.action === 'delete_address'
-        ? planAddressDeletion([currentSheet], operation.address_id)
-        : planPersonDeletion([currentSheet], residentIds[0]);
+        ? planAddressDeletion([currentSheet], operation.address_id, {
+            ...ADDRESS_PLACEHOLDER_OPTIONS,
+            currentDeletionOperationId: operation.operation_id,
+          })
+        : planPersonDeletion([currentSheet], residentIds[0], {
+            ...ADDRESS_PLACEHOLDER_OPTIONS,
+            currentDeletionOperationId: operation.operation_id,
+          });
     const expectedByIdentity = new Map(
       group.items.map((item) => [
         `${item.residentId}\u0000${item.addressId}`,
@@ -2605,8 +2717,14 @@ async function applySoftDashboardDeletion(
     const residentIds = [...new Set(group.items.map((item) => item.residentId).filter(Boolean))];
     const refreshed =
       operation.action === 'delete_address'
-        ? planAddressDeletion([currentSheet], operation.address_id)
-        : planPersonDeletion([currentSheet], residentIds[0]);
+        ? planAddressDeletion([currentSheet], operation.address_id, {
+            ...ADDRESS_PLACEHOLDER_OPTIONS,
+            currentDeletionOperationId: operation.operation_id,
+          })
+        : planPersonDeletion([currentSheet], residentIds[0], {
+            ...ADDRESS_PLACEHOLDER_OPTIONS,
+            currentDeletionOperationId: operation.operation_id,
+          });
     const expected = new Map(
       group.items.map((item) => [
         `${item.residentId}\u0000${item.addressId}`,
@@ -2719,6 +2837,80 @@ async function applySoftDashboardDeletion(
     }
     rowsMarked += pending.length;
   }
+  const placeholderGroups = groupBySheet(plan.placeholders);
+  let placeholdersCreated = 0;
+  for (const group of placeholderGroups.values()) {
+    ctx.assertLease();
+    const currentGrid = await readGrid(group.spreadsheetId, group.tabName);
+    const currentHeaders = trimHeaders(currentGrid[0]);
+    const currentAddressCol = currentHeaders.indexOf('address_id');
+    const currentDeletedCol = currentHeaders.indexOf('Deleted Record');
+    if (currentAddressCol === -1 || currentDeletedCol === -1) {
+      throw new Error(`${group.tabName} is missing address_id or Deleted Record during placeholder revalidation.`);
+    }
+    const activeAddressIds = new Set(
+      currentGrid
+        .slice(1)
+        .filter((row) => !String(row[currentDeletedCol] ?? '').trim())
+        .map((row) => String(row[currentAddressCol] ?? '').trim())
+        .filter(Boolean)
+    );
+    const neededItems = group.items.filter((item) => !activeAddressIds.has(item.addressId));
+    if (neededItems.length === 0) continue;
+    const rows = neededItems.map((item) => item.row);
+    const guarded = planGuardedAppends(currentGrid, rows);
+    if (guarded.errors.length > 0 || guarded.appends.length !== rows.length) {
+      throw new Error(
+        guarded.errors.join('; ') ||
+          `The required address placeholder could not be added safely to ${group.tabName}.`
+      );
+    }
+    const snapshotIds: number[] = [];
+    db.transaction(() => {
+      for (const append of guarded.appends) {
+        const item = neededItems.find((candidate) => {
+          const residentCol = candidate.headers.indexOf('resident_id');
+          return String(candidate.row[residentCol] ?? '').trim() === append.residentId;
+        });
+        const result = db.run(
+          `INSERT INTO run_snapshots
+             (run_id, spreadsheet_id, spreadsheet_name, tab_name, operation, resident_id,
+              range_a1, before_json, after_json, metadata_json)
+           VALUES (?, ?, ?, ?, 'row_append', ?, '', 'null', ?, ?)`,
+          [
+            ctx.runId,
+            group.spreadsheetId,
+            group.spreadsheetId,
+            group.tabName,
+            append.residentId,
+            JSON.stringify(append.row),
+            JSON.stringify({
+              kind: 'dashboard_deletion_placeholder',
+              operationId: operation.operation_id,
+              addressId: item?.addressId || operation.address_id,
+              headers: item?.headers || currentGrid[0] || [],
+            }),
+          ]
+        );
+        snapshotIds.push(Number(result.lastInsertRowid));
+      }
+    })();
+    const result = await google.appendValues(
+      group.spreadsheetId,
+      google.a1Range(group.tabName, 'A:ZZ'),
+      guarded.appends.map((append) => append.row)
+    );
+    if (result.updatedRows !== guarded.appends.length) {
+      throw new Error(`Google created ${result.updatedRows} of ${guarded.appends.length} required placeholders.`);
+    }
+    if (snapshotIds.length > 0) {
+      db.run(`UPDATE run_snapshots SET range_a1=? WHERE id IN (${snapshotIds.map(() => '?').join(',')})`, [
+        result.updatedRange,
+        ...snapshotIds,
+      ]);
+    }
+    placeholdersCreated += guarded.appends.length;
+  }
   db.run(
     `UPDATE deletion_operations
      SET status='applied', applied_run_id=?, error='', updated_at=datetime('now')
@@ -2729,7 +2921,8 @@ async function applySoftDashboardDeletion(
     operationId: operation.operation_id,
     action: operation.action,
     rowsMarked,
-    sheetsChanged: groups.size,
+    placeholdersCreated,
+    sheetsChanged: new Set([...groups.keys(), ...placeholderGroups.keys()]).size,
     storage: 'soft_delete',
     revertAvailable: true,
   };
@@ -3291,6 +3484,11 @@ async function applyAddressIntake(ctx: JobContext): Promise<unknown> {
   if (sourceHeaders.errors.length || masterHeaders.errors.length) {
     throw new Error([...sourceHeaders.errors, ...masterHeaders.errors].join(' '));
   }
+  for (const required of ['Resident Name', ADDRESS_PLACEHOLDER_COLUMN]) {
+    if (!masterHeaders.headers.includes(required)) {
+      throw new Error(`The master spreadsheet is missing required column "${required}".`);
+    }
+  }
   const sourceGrid: Grid = [sourceHeaders.headers, ...sourceRaw.slice(1)];
   const masterGrid: Grid = [masterHeaders.headers, ...masterRaw.slice(1)];
   const captainSheets = (await readCaptainFolder(folder.google_id, 10)).map((sheet) => {
@@ -3573,6 +3771,8 @@ function intakeRow(headers: string[], address: ApprovedIntakeAddress): CellValue
   const values: Record<string, CellValue> = {
     address_id: address.address_id,
     resident_id: address.resident_id,
+    'Resident Name': ADDRESS_PLACEHOLDER_NAME,
+    [ADDRESS_PLACEHOLDER_COLUMN]: true,
     APN: address.apn,
     _SitusHouseNo: address.house,
     _SitusDirection: address.direction,
@@ -4119,6 +4319,11 @@ async function appendNewlyZonedResidents(
     }
     const destinationGrid = [canonical.headers, ...rawDestinationGrid.slice(1)] as Grid;
     const destinationHeaders = trimHeaders(canonical.headers);
+    for (const required of ['Resident Name', ADDRESS_PLACEHOLDER_COLUMN]) {
+      if (!destinationHeaders.includes(required)) {
+        throw new Error(`${destination.toSpreadsheetName} is missing required column "${required}".`);
+      }
+    }
     const distributedColumns = new Set(captainDistributedHeaders(destinationHeaders));
     for (const column of Object.keys(destination.destinationFields)) {
       if (!destinationHeaders.includes(column)) {
@@ -4226,6 +4431,11 @@ async function preflightFolderZoneWrites(moves: AddressMoveCandidate[], masterGr
     }
     const destinationGrid = [canonical.headers, ...rawDestinationGrid.slice(1)] as Grid;
     const destinationHeaders = trimHeaders(canonical.headers);
+    for (const required of ['Resident Name', ADDRESS_PLACEHOLDER_COLUMN]) {
+      if (!destinationHeaders.includes(required)) {
+        throw new Error(`${destination.toSpreadsheetName} is missing required column "${required}".`);
+      }
+    }
     const distributedColumns = new Set(captainDistributedHeaders(destinationHeaders));
     const rows: Grid = [];
     for (const move of destinationMoves) {

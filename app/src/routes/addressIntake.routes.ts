@@ -1,5 +1,6 @@
 import type { Request, Response, Router } from 'express';
 import { randomUUID } from 'node:crypto';
+import { ADDRESS_PLACEHOLDER_COLUMN } from '../lib/addressPlaceholder';
 import type { Deps } from '../types';
 import * as google from '../google';
 import * as jobs from '../jobs';
@@ -110,6 +111,11 @@ export default function registerAddressIntakeRoutes(api: Router, { db }: Deps): 
             }),
       ]);
       const { available: mapboxAvailable, features, warning: zoneReadWarning } = zoneLoad;
+      for (const required of ['Resident Name', ADDRESS_PLACEHOLDER_COLUMN]) {
+        if (!(masterGrid[0] || []).includes(required)) {
+          throw new Error(`The master spreadsheet is missing required column "${required}".`);
+        }
+      }
       const deletedAddresses = await readActiveDeletedAddressRows(db);
       const plan = planAddressIntake(
         gridObjects(sourceGrid),
@@ -180,7 +186,7 @@ export default function registerAddressIntakeRoutes(api: Router, { db }: Deps): 
             } else {
               assignedZoneFields = zoneFields(matches[0]);
               const captainTargets = captainData.zoneSheets[zoneName] || [];
-              if (captainTargets.length === 1) {
+              if (captainTargets.length === 1 && captainTargets[0].supportsAddressPlaceholders) {
                 captainSpreadsheetId = captainTargets[0].spreadsheetId;
                 captainSpreadsheetName = captainTargets[0].spreadsheetName;
               } else {
@@ -190,6 +196,8 @@ export default function registerAddressIntakeRoutes(api: Router, { db }: Deps): 
                   reason:
                     captainTargets.length === 0
                       ? `${zoneName} has no captain sheet yet. This address will enter the master now and can be published after that sheet is created.`
+                      : captainTargets.length === 1
+                        ? `${captainTargets[0].spreadsheetName} is missing Resident Name or Address Placeholder. This address will enter the master now but will not be published until that column is added.`
                       : `${zoneName} maps to more than one captain sheet. This address will enter the master now but will not be published until that is corrected.`,
                 });
               }
@@ -318,17 +326,25 @@ async function readCaptainAddresses(
   dictionary: DictionaryAliasSpec[]
 ): Promise<{
   rows: AddressRow[];
-  zoneSheets: Record<string, Array<{ spreadsheetId: string; spreadsheetName: string }>>;
+  zoneSheets: Record<
+    string,
+    Array<{ spreadsheetId: string; spreadsheetName: string; supportsAddressPlaceholders: boolean }>
+  >;
 }> {
   const files = await google.listSpreadsheetsInFolder(folderId);
   files.sort((left, right) => left.id.localeCompare(right.id));
   const rowsByFile = new Map<string, AddressRow[]>();
   const zoneByFile = new Map<string, string>();
+  const placeholderSupportByFile = new Map<string, boolean>();
   await mapLimit(files, 10, async (file) => {
     const grid = await google.readValues(file.id, 'A:ZZ');
     const canonical = canonicalizeHeaders(grid[0] || [], dictionary);
     if (canonical.errors.length > 0) throw new Error(`${file.name}: ${canonical.errors.join(' ')}`);
     rowsByFile.set(file.id, gridObjects([canonical.headers, ...grid.slice(1)]));
+    placeholderSupportByFile.set(
+      file.id,
+      canonical.headers.includes('Resident Name') && canonical.headers.includes(ADDRESS_PLACEHOLDER_COLUMN)
+    );
     zoneByFile.set(
       file.id,
       detectSheetZoneWithName(
@@ -338,13 +354,20 @@ async function readCaptainAddresses(
       )
     );
   });
-  const zoneSheets: Record<string, Array<{ spreadsheetId: string; spreadsheetName: string }>> = {};
+  const zoneSheets: Record<
+    string,
+    Array<{ spreadsheetId: string; spreadsheetName: string; supportsAddressPlaceholders: boolean }>
+  > = {};
   for (const file of files) {
     const zone = zoneByFile.get(file.id) || '';
     if (!zone) continue;
     zoneSheets[zone] = [
       ...(zoneSheets[zone] || []),
-      { spreadsheetId: file.id, spreadsheetName: file.name },
+      {
+        spreadsheetId: file.id,
+        spreadsheetName: file.name,
+        supportsAddressPlaceholders: placeholderSupportByFile.get(file.id) === true,
+      },
     ];
   }
   return {

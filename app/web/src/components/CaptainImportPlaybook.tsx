@@ -78,7 +78,17 @@ export function CaptainImportPlaybook() {
   const selectedResidents =
     preview?.addresses
       .filter((address) => selected.has(address.addressId))
-      .reduce((sum, address) => sum + address.residents.length, 0) || 0;
+      .reduce(
+        (sum, address) => sum + address.residents.filter((resident) => !resident.addressPlaceholder).length,
+        0
+      ) || 0;
+  const selectedPlaceholders =
+    preview?.addresses
+      .filter((address) => selected.has(address.addressId))
+      .reduce(
+        (sum, address) => sum + address.residents.filter((resident) => resident.addressPlaceholder).length,
+        0
+      ) || 0;
   const selectedWarnings =
     preview?.addresses.filter((address) => selected.has(address.addressId) && address.risk !== 'none').length || 0;
   const safeAddresses = preview?.impact.safeAddresses ??
@@ -86,19 +96,25 @@ export function CaptainImportPlaybook() {
   const safeResidents = preview?.impact.safeResidents ??
     preview?.addresses
       .filter((address) => address.risk === 'none')
-      .reduce((sum, address) => sum + address.residents.length, 0) ?? 0;
+      .reduce(
+        (sum, address) => sum + address.residents.filter((resident) => !resident.addressPlaceholder).length,
+        0
+      ) ?? 0;
   const warnedResidents = preview?.impact.warnedResidents ??
     preview?.addresses
       .filter((address) => address.risk !== 'none')
-      .reduce((sum, address) => sum + address.residents.length, 0) ?? 0;
+      .reduce(
+        (sum, address) => sum + address.residents.filter((resident) => !resident.addressPlaceholder).length,
+        0
+      ) ?? 0;
 
   return (
     <div className="card" style={{ borderColor: 'var(--golden-orange)', marginTop: 20 }}>
-      <div className="eyebrow">Live update · new people from captains</div>
-      <h3 style={{ marginTop: 6 }}>Add captains’ new residents to the master</h3>
+      <div className="eyebrow">Live update · new people and addresses from captains</div>
+      <h3 style={{ marginTop: 6 }}>Add captains’ new records to the master</h3>
       <p className="reading-copy">
-        Scans every captain sheet for people missing from the master and groups them by address. The scan makes no
-        changes. Rows with unclear identities or incomplete addresses are set aside for review.
+        Scans every captain sheet for people and address placeholders missing from the master, grouped by address.
+        The scan makes no changes. Rows with unclear identities or incomplete addresses are set aside for review.
       </p>
       <div className="btn-row">
         <button className="btn highlight" onClick={scan} disabled={previewing || loadingPrevious}>
@@ -114,7 +130,8 @@ export function CaptainImportPlaybook() {
         <Modal title="Review captain-added residents" onClose={() => setPreview(null)} wide>
           <div className="callout">
             <strong>
-              Currently selected: {selectedResidents} resident(s) at {selected.size} address(es).
+              Currently selected: {selectedResidents} resident(s) and {selectedPlaceholders} address placeholder(s) at{' '}
+              {selected.size} address(es).
             </strong>
             <div style={{ marginTop: 6 }}>
               {safeResidents} residents at {safeAddresses} addresses have no duplicate warnings and are selected by
@@ -122,14 +139,15 @@ export function CaptainImportPlaybook() {
               and are not selected. {preview.impact.blockedAddresses} addresses cannot be imported until their data is fixed.
             </div>
             <div style={{ marginTop: 6 }}>
-              Overall, the scan found {preview.impact.residents} residents at {preview.impact.addresses} reviewable
-              addresses: {preview.impact.newAddresses} new addresses and {preview.impact.existingAddresses} existing
-              master addresses.
+              Overall, the scan found {preview.impact.residents} residents and {preview.impact.placeholders} address
+              placeholders at {preview.impact.addresses} reviewable addresses: {preview.impact.newAddresses} new
+              addresses and {preview.impact.existingAddresses} existing master addresses.
             </div>
           </div>
           <div className="card-grid" style={{ marginTop: 16 }}>
             <Metric value={selected.size} label="Addresses currently selected" />
             <Metric value={selectedResidents} label="Residents currently selected" />
+            <Metric value={selectedPlaceholders} label="Address placeholders currently selected" />
             <Metric value={preview.impact.warnedAddresses} label="Addresses needing duplicate review" alert />
             <Metric value={warnedResidents} label="Residents needing duplicate review" alert />
             <Metric value={preview.impact.blockedAddresses} label="Addresses blocked (fix data first)" alert />
@@ -194,7 +212,11 @@ export function CaptainImportPlaybook() {
                         </td>
                         <td>
                           {address.residents.map((resident) => resident.residentName || resident.residentId).join(' · ')}
-                          <div className="card-meta">{address.residents.length} resident row(s)</div>
+                          <div className="card-meta">
+                            {address.residents.filter((resident) => !resident.addressPlaceholder).length} resident(s)
+                            {' · '}
+                            {address.residents.filter((resident) => resident.addressPlaceholder).length} address placeholder(s)
+                          </div>
                         </td>
                         <td>
                           {address.risk === 'none' ? (
@@ -291,7 +313,7 @@ export function CaptainImportPlaybook() {
           )}
           {!preview.canApply && preview.addresses.length === 0 && (
             <div className="callout info" style={{ marginTop: 18 }}>
-              No importable captain-added residents were found.
+              No importable captain-added people or address placeholders were found.
             </div>
           )}
           <div className="btn-row" style={{ marginTop: 18 }}>

@@ -479,6 +479,96 @@ test('planPullNewResidentsFromFolder: permits address-only placeholder rows when
   assert.strictEqual(plan.addresses[0].residents[0].residentName, '');
 });
 
+test('planPullNewResidentsFromFolder: does not treat Dashboard placeholders as duplicate people', () => {
+  const master: Grid = [
+    ['address_id', 'resident_id', 'Resident Name', 'Address Placeholder', 'APN', 'House', 'Street'],
+    ['A1', 'M1', 'Placeholder Resident', true, '100', '10', 'Oak St'],
+  ];
+  const captain: Grid = [
+    ['address_id', 'resident_id', 'Resident Name', 'Address Placeholder', 'APN', 'House', 'Street'],
+    ['A2', 'C1', 'placeholder resident', 'TRUE', '200', '20', 'Pine St'],
+  ];
+  const plan = planPullNewResidentsFromFolder(
+    master,
+    [{ spreadsheetId: 'S1', spreadsheetName: 'Zone 1', tabName: 'Sheet1', zone: 'Zone 1', grid: captain }],
+    { requiredColumns: [] }
+  );
+
+  const placeholder = plan.addresses[0].residents[0];
+  assert.strictEqual(placeholder.addressPlaceholder, true);
+  assert.strictEqual(placeholder.risk, 'none');
+  assert.strictEqual(placeholder.row[2], 'Placeholder Resident');
+  assert.strictEqual(placeholder.row[3], true);
+});
+
+test('planPullNewResidentsFromFolder: skips a redundant placeholder for an existing master address', () => {
+  const master: Grid = [
+    ['address_id', 'resident_id', 'Resident Name', 'Address Placeholder'],
+    ['A1', 'M1', 'Existing Person', false],
+  ];
+  const captain: Grid = [
+    ['address_id', 'resident_id', 'Resident Name', 'Address Placeholder'],
+    ['A1', 'C1', 'Placeholder Resident', true],
+  ];
+  const plan = planPullNewResidentsFromFolder(
+    master,
+    [{ spreadsheetId: 'S1', spreadsheetName: 'Zone 1', tabName: 'Sheet1', zone: 'Zone 1', grid: captain }],
+    { requiredColumns: [] }
+  );
+
+  assert.strictEqual(plan.addresses.length, 0);
+  assert.match(plan.skipped[0].reason, /already has a master row/i);
+});
+
+test('planPullNewResidentsFromFolder: blocks multiple placeholders for one new address', () => {
+  const master: Grid = [['address_id', 'resident_id', 'Resident Name', 'Address Placeholder']];
+  const captain: Grid = [
+    ['address_id', 'resident_id', 'Resident Name', 'Address Placeholder'],
+    ['A2', 'C1', 'Placeholder Resident', true],
+    ['A2', 'C2', 'Placeholder Resident', true],
+  ];
+  const plan = planPullNewResidentsFromFolder(
+    master,
+    [{ spreadsheetId: 'S1', spreadsheetName: 'Zone 1', tabName: 'Sheet1', zone: 'Zone 1', grid: captain }],
+    { requiredColumns: [] }
+  );
+
+  assert.strictEqual(plan.addresses.length, 0);
+  assert.match(plan.blocked[0].reason, /more than one placeholder/i);
+});
+
+test('planPullNewResidentsFromFolder: blocks placeholders when the master lacks contract columns', () => {
+  const master: Grid = [['address_id', 'resident_id']];
+  const captain: Grid = [
+    ['address_id', 'resident_id', 'Resident Name', 'Address Placeholder'],
+    ['A2', 'C1', 'Placeholder Resident', true],
+  ];
+  const plan = planPullNewResidentsFromFolder(
+    master,
+    [{ spreadsheetId: 'S1', spreadsheetName: 'Zone 1', tabName: 'Sheet1', zone: 'Zone 1', grid: captain }],
+    { requiredColumns: [] }
+  );
+
+  assert.strictEqual(plan.addresses.length, 0);
+  assert.match(plan.blocked[0].reason, /missing a required field/i);
+});
+
+test('planPullNewResidentsFromFolder: blocks TRUE placeholders with a real-looking name', () => {
+  const master: Grid = [['address_id', 'resident_id', 'Resident Name', 'Address Placeholder']];
+  const captain: Grid = [
+    ['address_id', 'resident_id', 'Resident Name', 'Address Placeholder'],
+    ['A2', 'C1', 'Ada Lovelace', true],
+  ];
+  const plan = planPullNewResidentsFromFolder(
+    master,
+    [{ spreadsheetId: 'S1', spreadsheetName: 'Zone 1', tabName: 'Sheet1', zone: 'Zone 1', grid: captain }],
+    { requiredColumns: [] }
+  );
+
+  assert.strictEqual(plan.addresses.length, 0);
+  assert.match(plan.blocked[0].reason, /not exactly "Placeholder Resident"/i);
+});
+
 test('planPullNewResidentsFromFolder: cannot carry sales values from captain sheets', () => {
   const master: Grid = [
     ['address_id', 'resident_id', 'Resident Name', 'Latest New Owner', 'Sales History'],
