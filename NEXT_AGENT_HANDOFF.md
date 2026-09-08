@@ -39,70 +39,37 @@ You are taking over an active effort to finish SheetSmart, a single-operator adm
 - Operations workbook ingestion, deletion application, tombstones, activity feed, and restoration protections.
 - Sales-field retirement guards in captain-to-master paths.
 
-The active branch is `feature/folder-zone-reconcile`. At handoff, the worktree was clean and the latest commits were:
+The active branch is `feature/folder-zone-reconcile`. Latest commits at handoff:
 
-- `f2b780d Explain address intake source setup`
-- `cadca8a Make blocked imports actionable`
-- `1282ffb Show captain import decision counts`
-- `bc2224c Explain cleanup blockers with next actions`
-- `ba66670 Block duplicate situs during captain import`
+- `fb256f9` Document deferred Mapbox zone metadata audit feature
+- `72365f8` Adopt source address_id values during address intake
+- `0263141` Remove coordinate-only proximity from address intake review
+- `68177f5` Align address placeholders across SheetSmart workflows
 
-## Exact current user workflow
+`README.md` has an unrelated uncommitted modification — preserve it; do not commit unless the user asks.
 
-The user successfully imported 272 captain-originated rows and then wanted to process a separate list containing roughly 1,000–3,000 possibly missing addresses.
+## Address intake status (September 2026)
 
-They opened **Playbooks → Add missing addresses safely**, but its source dropdown only showed `Sales Tracker`. This was not a Google picker: that dropdown lists connections registered with type `external`.
+The user completed a successful **10-address acceptance test** after these fixes:
 
-The user was just instructed to:
+- Source `address_id` UUIDs from the missing-addresses sheet are adopted verbatim (not replaced with situs hashes).
+- Coordinates alone no longer hold addresses for duplicate review.
+- Placeholder contract: `Placeholder Resident`, boolean `TRUE` in `Address Placeholder`, UUID `resident_id`, source capitalization preserved.
+- Mapbox zone/captain contact fields are written from Mapbox, not from stale spreadsheet values.
 
-1. Open **Sources**.
-2. Add the missing-address spreadsheet.
-3. Select type **Outside list / address-intake spreadsheet**.
-4. Paste the spreadsheet ID and optional tab name.
-5. Share it as Editor with `sheetsmart-bot@sheetsmart-503108.iam.gserviceaccount.com`.
-6. Save and Test the connection.
-7. Return to the playbook and scan it.
+The user is ready to **bulk-import the remaining missing addresses** in batches of up to 250 with a fresh scan before each batch. An earlier 10-row run was undone; do not reintroduce hash-only address IDs when the source sheet provides UUIDs.
 
-The retired Sales Tracker connection can be removed from Sources without deleting the Google spreadsheet.
-
-The latest commit added an inline link below the address-intake source dropdown explaining that only configured outside sources appear there.
+Zone Dashboard developer confirmed hash or UUID `address_id` formats both work if seeded on every row at import time.
 
 ## Immediate next action
 
-Wait for the user to add/test the missing-address source. Then guide them to **Scan address list**, but do not tell them to apply immediately.
+Guide the user through bulk missing-address intake until the outside source is exhausted:
 
-First inspect and explain the preview totals:
+1. Fresh scan → select up to 250 clearly new addresses → apply → spot-check → confirm Undo.
+2. Repeat until no new addresses remain.
+3. Do not mutate Google Sheets without SheetSmart preview + user confirmation.
 
-- already known/exact matches;
-- clearly new addresses;
-- close matches requiring review;
-- invalid or blocked rows;
-- duplicate rows inside the incoming list.
-
-Confirm that the source columns were interpreted correctly. Supported address header aliases are defined in `app/src/routes/addressIntake.routes.ts`; expected fields include address ID/APN when available, situs house number, direction, street, unit, city, state, ZIP, latitude, and longitude.
-
-Before live apply, verify:
-
-- obvious duplicates are not selected as new;
-- close matches are held for review;
-- Mapbox can compute a zone;
-- the destination captain sheet exists;
-- active tombstones cannot be resurrected;
-- the resulting records are address-only placeholders with fresh resident IDs as designed;
-- preview counts and selection language are understandable.
-
-If the test connection or scan fails, diagnose the concrete API/server error and fix it. Do not merely reinterpret a backend diagnostic for the user.
-
-## Remaining completion path
-
-1. Finish the one-time missing-address intake with the user.
-2. Re-run captain import if warned/blocked captain addresses remain, resolving ID mismatches rather than duplicating addresses.
-3. Run and apply the final folder cleanup after imported addresses are in the master.
-4. Verify private note formulas became literal text without displaying their contents.
-5. Verify booleans and `_SitusUnit` formatting in master and captain sheets.
-6. Exercise production acceptance flows: preview, live apply, run details, and Undo on a safe small sample.
-7. Run backend tests/build and frontend build.
-8. Review final git status and commit only intended source changes. Do not add generated `app/dist` or `app/web/dist` files unless repository policy explicitly requires them.
+After intake: folder cleanup, captain-to-master reconciliation, deferred Mapbox zone-metadata audit (documented below).
 
 ## Deferred feature: meaningful progress indicators
 
