@@ -19,7 +19,6 @@ export type IntakeRiskGroup =
   | 'exact_identity'
   | 'exact_parcel'
   | 'exact_situs'
-  | 'near_coordinate'
   | 'fuzzy_situs'
   | 'new_address'
   | 'blocked';
@@ -32,8 +31,6 @@ export interface AddressIntakeOptions {
   requiredFields?: AddressField[];
   /** Maximum placeholder rows in each append-friendly batch. */
   maxBatchSize?: number;
-  /** Review threshold only; coordinates never cause an automatic match. */
-  nearCoordinateMeters?: number;
   /** Review threshold only, from 0 to 1. */
   fuzzyThreshold?: number;
   /** Prefix used for deterministic IDs assigned to new placeholder rows. */
@@ -73,7 +70,8 @@ export interface AddressMatch {
 
 export interface ReviewCandidate {
   addressId: string;
-  reasons: Array<'near_coordinate' | 'fuzzy_situs'>;
+  reasons: Array<'fuzzy_situs'>;
+  /** Supporting context only; never an independent review signal. */
   distanceMeters?: number;
   similarity?: number;
   canonical: CanonicalAddress;
@@ -495,10 +493,6 @@ export function planAddressIntake(
   };
   const required = options.requiredFields || ['house', 'street', 'city', 'state', 'zip'];
   const maxBatchSize = options.maxBatchSize ?? 100;
-  // Ordinary neighboring houses are often within 75 metres of one another.
-  // Proximity is useful only when two records are close enough to plausibly
-  // describe the same building or parcel.
-  const nearMeters = options.nearCoordinateMeters ?? 5;
   const fuzzyThreshold = options.fuzzyThreshold ?? 0.72;
   const prefix = options.placeholderIdPrefix ?? 'ADDRESS-PLACEHOLDER-';
   if (!Number.isInteger(maxBatchSize) || maxBatchSize < 1) {
@@ -506,8 +500,8 @@ export function planAddressIntake(
     plan.fingerprint = hash(plan);
     return plan;
   }
-  if (nearMeters < 0 || fuzzyThreshold < 0 || fuzzyThreshold > 1) {
-    plan.errors.push('Review thresholds must be non-negative, and fuzzyThreshold must be at most 1.');
+  if (fuzzyThreshold < 0 || fuzzyThreshold > 1) {
+    plan.errors.push('fuzzyThreshold must be between 0 and 1.');
     plan.fingerprint = hash(plan);
     return plan;
   }
@@ -691,42 +685,29 @@ export function planAddressIntake(
     }
 
     const candidates: ReviewCandidate[] = [];
-    const boundedCandidates = [...canonical.values()]
-      .filter((value) => coarseCandidate(input, value, nearMeters))
-      .sort(
-        (left, right) =>
-          coarseRelevance(input, right, nearMeters) - coarseRelevance(input, left, nearMeters) ||
-          left.addressId.localeCompare(right.addressId)
-      );
-    for (const value of boundedCandidates) {
-      const distance = distanceMeters(input, value);
+    for (const value of canonical.values()) {
+      if (!fuzzySitusComparable(input, value)) continue;
       const score = fuzzySitusSimilarity(input, value);
-      const reasons: ReviewCandidate['reasons'] = [];
-      if (distance !== undefined && distance <= nearMeters) reasons.push('near_coordinate');
-      if (score >= fuzzyThreshold && input.normalizedSitus !== value.normalizedSitus) reasons.push('fuzzy_situs');
-      if (reasons.length > 0) {
-        candidates.push({
-          addressId: value.addressId,
-          reasons,
-          ...(distance !== undefined && distance <= nearMeters ? { distanceMeters: distance } : {}),
-          ...(score >= fuzzyThreshold && input.normalizedSitus !== value.normalizedSitus
-            ? { similarity: score }
-            : {}),
-          canonical: value,
-        });
-      }
+      if (score < fuzzyThreshold || input.normalizedSitus === value.normalizedSitus) continue;
+      const distance = distanceMeters(input, value);
+      candidates.push({
+        addressId: value.addressId,
+        reasons: ['fuzzy_situs'],
+        ...(distance !== undefined ? { distanceMeters: distance } : {}),
+        similarity: score,
+        canonical: value,
+      });
     }
-    candidates.sort((a, b) =>
-      reviewCandidateRank(b) - reviewCandidateRank(a) ||
-      (a.distanceMeters ?? Infinity) - (b.distanceMeters ?? Infinity) ||
-      (b.similarity || 0) - (a.similarity || 0) ||
-      a.addressId.localeCompare(b.addressId)
+    candidates.sort(
+      (left, right) =>
+        (right.similarity || 0) - (left.similarity || 0) ||
+        (left.distanceMeters ?? Infinity) - (right.distanceMeters ?? Infinity) ||
+        left.addressId.localeCompare(right.addressId)
     );
     // Review is a decision aid, not a dump of every address on the same
     // street. More than five candidates is not actionable for an operator.
     candidates.splice(5);
     if (candidates.length > 0) {
-      const riskGroups = [...new Set(candidates.flatMap((candidate) => candidate.reasons))] as IntakeRiskGroup[];
       plan.review.push({
         externalRow,
         inputAddressId: input.addressId,
@@ -735,13 +716,9 @@ export function planAddressIntake(
           addressId: input.addressId,
           provenance: [{ dataset: 'external', row: externalRow }],
         },
-        riskGroups,
+        riskGroups: ['fuzzy_situs'],
         reason:
-          riskGroups.includes('near_coordinate') && riskGroups.includes('fuzzy_situs')
-            ? 'A very nearby record also has a similarly spelled address. Check whether they are the same place.'
-            : riskGroups.includes('near_coordinate')
-              ? 'An existing record uses nearly the same map location. Check whether they are the same place.'
-              : 'An existing record has the same house number and a very similar street name. Check for a spelling difference.',
+          'An existing record has the same house number and a very similar street name. Check for a spelling difference.',
         candidates,
       });
       return;
@@ -759,7 +736,6 @@ export function planAddressIntake(
       existing: [...canonical.values()].sort((a, b) => a.addressId.localeCompare(b.addressId)),
       required,
       maxBatchSize,
-      nearMeters,
       fuzzyThreshold,
       prefix,
     },
@@ -772,51 +748,6 @@ export function planAddressIntake(
     placeholders: plan.placeholders.map((item) => item.fingerprint),
   });
   return plan;
-}
-
-function coarseCandidate(
-  input: ParsedAddress,
-  existing: CanonicalAddress,
-  nearMeters: number
-): boolean {
-  if (fuzzySitusComparable(input, existing)) return true;
-  if (
-    input.latitude !== undefined &&
-    input.longitude !== undefined &&
-    existing.latitude !== undefined &&
-    existing.longitude !== undefined
-  ) {
-    const latitudeWindow = nearMeters / 111_000;
-    const longitudeWindow = latitudeWindow / Math.max(0.2, Math.cos((input.latitude * Math.PI) / 180));
-    return (
-      Math.abs(input.latitude - existing.latitude) <= latitudeWindow &&
-      Math.abs(input.longitude - existing.longitude) <= longitudeWindow
-    );
-  }
-  return false;
-}
-
-function coarseRelevance(
-  input: ParsedAddress,
-  existing: CanonicalAddress,
-  nearMeters: number
-): number {
-  let score = 0;
-  if (fuzzySitusComparable(input, existing)) {
-    score += 75 + 40 * bigramSimilarity(input.street, existing.street);
-  }
-  if (
-    input.latitude !== undefined &&
-    input.longitude !== undefined &&
-    existing.latitude !== undefined &&
-    existing.longitude !== undefined
-  ) {
-    const distance = distanceMeters(input, existing);
-    if (distance !== undefined) {
-      score += 30 * Math.max(0, 1 - distance / Math.max(1, nearMeters));
-    }
-  }
-  return score;
 }
 
 /**
@@ -863,34 +794,6 @@ function compactIdentity(value: string): string {
   return words(value)
     .replace(/(\d)\s+(?=[A-Z])/g, '$1')
     .replace(/([A-Z])\s+(?=\d)/g, '$1');
-}
-
-function reviewCandidateRank(candidate: ReviewCandidate): number {
-  const near = candidate.reasons.includes('near_coordinate');
-  const fuzzy = candidate.reasons.includes('fuzzy_situs');
-  if (near && fuzzy) return 3;
-  if (near) return 2;
-  return 1;
-}
-
-function bigramSimilarity(left: string, right: string): number {
-  if (left === right) return 1;
-  if (left.length < 2 || right.length < 2) return 0;
-  const leftPairs = new Map<string, number>();
-  for (let index = 0; index < left.length - 1; index++) {
-    const pair = left.slice(index, index + 2);
-    leftPairs.set(pair, (leftPairs.get(pair) || 0) + 1);
-  }
-  let overlap = 0;
-  for (let index = 0; index < right.length - 1; index++) {
-    const pair = right.slice(index, index + 2);
-    const available = leftPairs.get(pair) || 0;
-    if (available > 0) {
-      overlap++;
-      leftPairs.set(pair, available - 1);
-    }
-  }
-  return (2 * overlap) / (left.length + right.length - 2);
 }
 
 export const planExternalAddressIntake = planAddressIntake;

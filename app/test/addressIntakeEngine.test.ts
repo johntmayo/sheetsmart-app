@@ -267,7 +267,7 @@ test('does not use APN alone as identity and blocks ambiguous exact situs matche
   assert.strictEqual(bySitus.blocked[0].code, 'ambiguous_match');
 });
 
-test('near coordinates are review-only and never automatically adopt an ID', () => {
+test('identical coordinates alone do not create review candidates', () => {
   const plan = planAddressIntake(
     [
       incoming({
@@ -278,17 +278,45 @@ test('near coordinates are review-only and never automatically adopt an ID', () 
         Longitude: -118.0001,
       }),
     ],
-    master,
-    [],
-    { nearCoordinateMeters: 25 }
+    master
   );
 
   assert.strictEqual(plan.matches.length, 0);
-  assert.strictEqual(plan.placeholders.length, 0);
-  assert.strictEqual(plan.review.length, 1);
-  assert.strictEqual(plan.review[0].candidates[0].addressId, 'A-100');
-  assert.ok(plan.review[0].candidates[0].reasons.includes('near_coordinate'));
-  assert.ok((plan.review[0].candidates[0].distanceMeters || Infinity) < 25);
+  assert.strictEqual(plan.review.length, 0);
+  assert.strictEqual(plan.placeholders.length, 1);
+});
+
+test('distinct addresses with exactly identical coordinates proceed as new addresses', () => {
+  const sharedPin = { Latitude: 34.19949, Longitude: -118.1 };
+  const existing = [
+    {
+      address_id: 'UNIT-A',
+      House: '100',
+      Street: 'Shared Pin Lane',
+      Unit: 'A',
+      City: 'Altadena',
+      State: 'CA',
+      ZIP: '91001',
+      ...sharedPin,
+    },
+  ];
+  const plan = planAddressIntake(
+    [
+      incoming({
+        House: '100',
+        Street: 'Shared Pin Lane',
+        Unit: 'B',
+        City: 'Altadena',
+        State: 'CA',
+        ZIP: '91001',
+        ...sharedPin,
+      }),
+    ],
+    existing
+  );
+
+  assert.strictEqual(plan.review.length, 0);
+  assert.strictEqual(plan.placeholders.length, 1);
 });
 
 test('fuzzy situs candidates are review-only and expose similarity risk', () => {
@@ -365,26 +393,26 @@ test('does not hold back neighboring houses based only on map points ten metres 
   assert.strictEqual(plan.placeholders.length, 1);
 });
 
-test('limits review output to the five most plausible existing addresses', () => {
-  const sameLocation = Array.from({ length: 12 }, (_, index) => ({
-    address_id: `NEAR-${index}`,
-    APN: `NEAR-PARCEL-${index}`,
-    House: String(100 + index),
-    Street: 'Different Road',
+test('limits review output to the five most plausible fuzzy situs candidates', () => {
+  const fuzzyCandidates = Array.from({ length: 12 }, (_, index) => ({
+    address_id: `FUZZY-${index}`,
+    APN: `FUZZY-PARCEL-${index}`,
+    House: '30',
+    Street: `Cedar Avenu${index}`,
     City: 'Springfield',
     State: 'CA',
     ZIP: '90003',
-    Latitude: 34,
+    Latitude: 34 + index * 0.01,
     Longitude: -118,
   }));
   const plan = planAddressIntake(
-    [incoming({ Latitude: 34, Longitude: -118 })],
-    sameLocation
+    [incoming({ House: '30', Street: 'Cedar Avenue' })],
+    fuzzyCandidates
   );
 
   assert.strictEqual(plan.review.length, 1);
   assert.strictEqual(plan.review[0].candidates.length, 5);
-  assert.match(plan.review[0].reason, /same map location/i);
+  assert.match(plan.review[0].reason, /similar street name/i);
 });
 
 test('reviews punctuation-equivalent house and unit identifiers', () => {
@@ -460,32 +488,28 @@ test('does not fuzzy-match different recognized street suffixes', () => {
   assert.strictEqual(plan.placeholders.length, 1);
 });
 
-test('does not discard a true nearby candidate behind fuzzy prefilter results', () => {
-  const fuzzyDistractors = Array.from({ length: 205 }, (_, index) => ({
-    address_id: `FUZZY-${index}`,
-    House: '30',
-    Street: `Cedar Place ${index}`,
-    City: 'Springfield',
-    State: 'CA',
-    ZIP: '90003',
-  }));
-  const nearby = {
-    address_id: 'ACTUALLY-NEAR',
-    House: '999',
-    Street: 'Remote Way',
-    City: 'Springfield',
-    State: 'CA',
-    ZIP: '90009',
-    Latitude: 34,
-    Longitude: -118,
-  };
+test('includes coordinate distance as supporting context on fuzzy situs candidates', () => {
   const plan = planAddressIntake(
-    [incoming({ Latitude: 34, Longitude: -118 })],
-    [...fuzzyDistractors, nearby]
+    [
+      incoming({
+        House: '10',
+        Direction: 'N',
+        Street: 'Oaks St',
+        City: 'Springfield',
+        ZIP: '90001',
+        Latitude: 34.0001,
+        Longitude: -118.0001,
+      }),
+    ],
+    master,
+    [],
+    { fuzzyThreshold: 0.7 }
   );
 
-  assert.strictEqual(plan.placeholders.length, 0);
-  assert.ok(plan.review[0].candidates.some((candidate) => candidate.addressId === 'ACTUALLY-NEAR'));
+  assert.strictEqual(plan.review.length, 1);
+  assert.strictEqual(plan.review[0].candidates[0].addressId, 'A-100');
+  assert.deepStrictEqual(plan.review[0].candidates[0].reasons, ['fuzzy_situs']);
+  assert.ok(plan.review[0].candidates[0].distanceMeters !== undefined);
 });
 
 test('produces explicit deterministic placeholders with provenance and bounded batches', () => {
@@ -668,6 +692,6 @@ test('invalid batching and review thresholds return errors without planning outp
   assert.strictEqual(badBatch.placeholders.length, 0);
 
   const badFuzzy = planAddressIntake([incoming()], master, [], { fuzzyThreshold: 2 });
-  assert.match(badFuzzy.errors[0], /threshold/i);
+  assert.match(badFuzzy.errors[0], /fuzzyThreshold/i);
   assert.strictEqual(badFuzzy.placeholders.length, 0);
 });
