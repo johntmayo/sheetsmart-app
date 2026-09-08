@@ -524,7 +524,7 @@ test('produces explicit deterministic placeholders with provenance and bounded b
   assert.strictEqual(first.placeholders.length, 3);
   assert.deepStrictEqual(first.batches.map((batch) => batch.length), [2, 1]);
   const placeholder = first.placeholders[0];
-  assert.match(placeholder.address_id, /^ADDRESS-PLACEHOLDER-[A-F0-9]{20}$/);
+  assert.strictEqual(placeholder.address_id, 'EXT-1');
   assert.strictEqual(placeholder.record_type, 'address_placeholder');
   assert.strictEqual(placeholder.provenance_dataset, 'external');
   assert.strictEqual(placeholder.provenance_row, 2);
@@ -584,14 +584,27 @@ test('combines repeated incoming situs rows into one placeholder', () => {
   const plan = planAddressIntake(
     [
       incoming({ address_id: 'NEW-A', APN: '', Street: 'Cedar Avenue' }),
-      incoming({ address_id: 'NEW-B', APN: '', Street: 'CEDAR AVE.' }),
+      incoming({ address_id: 'NEW-A', APN: '', Street: 'CEDAR AVE.' }),
     ],
     master
   );
   assert.strictEqual(plan.blocked.length, 0);
   assert.strictEqual(plan.placeholders.length, 1);
+  assert.strictEqual(plan.placeholders[0].address_id, 'NEW-A');
   assert.strictEqual(plan.coalescedSourceRows, 1);
   assert.deepStrictEqual(plan.placeholders[0].provenance_rows, [2, 3]);
+});
+
+test('blocks repeated source rows that disagree on address_id for the same situs', () => {
+  const plan = planAddressIntake(
+    [
+      incoming({ address_id: 'NEW-A', APN: '', Street: 'Cedar Avenue' }),
+      incoming({ address_id: 'NEW-B', APN: '', Street: 'CEDAR AVE.' }),
+    ],
+    master
+  );
+  assert.strictEqual(plan.placeholders.length, 0);
+  assert.strictEqual(plan.blocked[0].code, 'conflicting_identity');
 });
 
 test('combines the same source ID and situs instead of rejecting both rows', () => {
@@ -605,6 +618,7 @@ test('combines the same source ID and situs instead of rejecting both rows', () 
 
   assert.strictEqual(plan.blocked.length, 0);
   assert.strictEqual(plan.placeholders.length, 1);
+  assert.strictEqual(plan.placeholders[0].address_id, 'SOURCE-1');
   assert.deepStrictEqual(plan.placeholders[0].provenance_rows, [2, 3]);
 });
 
@@ -623,27 +637,47 @@ test('does not let a later coalesced row hide an ID belonging to another address
 test('uses complete coordinates from a later copy of the same source address', () => {
   const plan = planAddressIntake(
     [
-      incoming({ address_id: 'SOURCE-A', Latitude: '', Longitude: '' }),
-      incoming({ address_id: 'SOURCE-B', Latitude: 34.25, Longitude: -118.15 }),
+      incoming({ address_id: 'SOURCE-1', Latitude: '', Longitude: '' }),
+      incoming({ address_id: 'SOURCE-1', Latitude: 34.25, Longitude: -118.15 }),
     ],
     []
   );
 
   assert.strictEqual(plan.placeholders.length, 1);
+  assert.strictEqual(plan.placeholders[0].address_id, 'SOURCE-1');
   assert.strictEqual(plan.placeholders[0].latitude, 34.25);
   assert.strictEqual(plan.placeholders[0].longitude, -118.15);
 });
 
-test('generates the same new ID when APN coordinates or source ID change', () => {
-  const first = planAddressIntake(
-    [incoming({ address_id: 'SOURCE-A', APN: 'PARCEL-A', Latitude: 34, Longitude: -118 })],
-    []
-  );
-  const second = planAddressIntake(
-    [incoming({ address_id: 'SOURCE-B', APN: 'PARCEL-B', Latitude: 34.01, Longitude: -118.01 })],
+test('adopts a provided source address_id with preserved casing', () => {
+  const plan = planAddressIntake(
+    [
+      incoming({
+        address_id: 'addr_07b2c3f2-cb0b-4202-b96d-f1906708ee43',
+        House: '30',
+      }),
+    ],
     []
   );
 
+  assert.strictEqual(plan.placeholders.length, 1);
+  assert.strictEqual(
+    plan.placeholders[0].address_id,
+    'addr_07b2c3f2-cb0b-4202-b96d-f1906708ee43'
+  );
+});
+
+test('generates the same hash address_id when source address_id is blank', () => {
+  const first = planAddressIntake(
+    [incoming({ APN: 'PARCEL-A', Latitude: 34, Longitude: -118 })],
+    []
+  );
+  const second = planAddressIntake(
+    [incoming({ APN: 'PARCEL-B', Latitude: 34.01, Longitude: -118.01 })],
+    []
+  );
+
+  assert.match(first.placeholders[0].address_id, /^ADDRESS-PLACEHOLDER-[A-F0-9]{20}$/);
   assert.strictEqual(first.placeholders[0].address_id, second.placeholders[0].address_id);
 });
 

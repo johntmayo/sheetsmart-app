@@ -200,6 +200,8 @@ const NORMALIZED_SUFFIXES = new Set(Object.values(SUFFIXES));
 
 interface ParsedAddress {
   addressId: string;
+  /** Source casing preserved for writes; matching uses addressId. */
+  sourceAddressId: string;
   apn: string;
   house: string;
   direction: string;
@@ -276,6 +278,7 @@ function coordinate(value: unknown, min: number, max: number): number | undefine
 function parse(row: AddressRow, map: AddressHeaders): ParsedAddress {
   const result: ParsedAddress = {
     addressId: keyText(row[map.addressId]),
+    sourceAddressId: text(row[map.addressId]),
     apn: keyText(row[map.apn]),
     house: words(row[map.house]),
     direction: normalizeDirection(row[map.direction]),
@@ -440,6 +443,11 @@ function riskForTier(tier: ExactMatchTier): IntakeRiskGroup {
   return 'exact_situs';
 }
 
+function placeholderAddressId(input: ParsedAddress, prefix: string, fingerprint: string): string {
+  if (input.sourceAddressId) return input.sourceAddressId;
+  return `${prefix}${fingerprint.slice(0, 20).toUpperCase()}`;
+}
+
 function placeholderFor(
   input: ParsedAddress,
   externalRows: number[],
@@ -449,7 +457,7 @@ function placeholderFor(
   const fingerprint = hash(identity);
   const externalRow = externalRows[0];
   return {
-    address_id: `${prefix}${fingerprint.slice(0, 20).toUpperCase()}`,
+    address_id: placeholderAddressId(input, prefix, fingerprint),
     record_type: 'address_placeholder',
     apn: input.apn,
     house: input.sourceHouse,
@@ -464,7 +472,7 @@ function placeholderFor(
     provenance_dataset: 'external',
     provenance_row: externalRow,
     provenance_rows: externalRows,
-    provenance_input_address_id: input.addressId,
+    provenance_input_address_id: input.sourceAddressId || input.addressId,
     risk_group: 'new_address',
     fingerprint,
   };
@@ -614,8 +622,19 @@ export function planAddressIntake(
     const coordinateSource = groupedInputs.find(
       (value) => value.latitude !== undefined && value.longitude !== undefined
     );
+    const sourceAddressIds = [
+      ...new Set(groupedInputs.map((value) => value.sourceAddressId).filter(Boolean)),
+    ];
+    if (sourceAddressIds.length > 1) {
+      block(
+        'conflicting_identity',
+        'Repeated source rows for the same street address disagree on address_id.'
+      );
+      return;
+    }
     input = {
       ...input,
+      sourceAddressId: sourceAddressIds[0] || input.sourceAddressId,
       apn: input.apn || groupedInputs.find((value) => value.apn)?.apn || '',
       latitude: coordinateSource?.latitude ?? input.latitude,
       longitude: coordinateSource?.longitude ?? input.longitude,
