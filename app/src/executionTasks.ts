@@ -418,6 +418,9 @@ async function pullNewResidentsCopy(ctx: JobContext): Promise<unknown> {
  * A column the dictionary does not know stays unlisted, so the pull planner's
  * conflict-only default applies to it.
  */
+const MAPBOX_ASSIGNMENT_CANONICALS = ['ZoneName', 'NC Name', 'NC Phone', 'NC Email'];
+const SENSITIVE_NOTE_CANONICALS = ['Person Notes', 'Address Notes', 'Outreach Log'];
+
 export function pullPoliciesForHeaders(headers: string[]): Record<string, string> {
   const policies: Record<string, string> = {};
   const fields = db.all<{ id: number; canonical_name: string; default_policy: string }>(
@@ -429,6 +432,22 @@ export function pullPoliciesForHeaders(headers: string[]): Record<string, string
       .map((row) => row.alias);
     const header = findColumn(headers, [field.canonical_name, ...aliases]);
     if (header) policies[header] = field.default_policy;
+  }
+  return policies;
+}
+
+/** Live folder pull: Mapbox owns zone/captain-assignment columns; note bodies stay off the inbox. */
+export function pullPoliciesForLiveFolderPull(headers: string[]): Record<string, string> {
+  const policies = pullPoliciesForHeaders(headers);
+  for (const canonical of [...MAPBOX_ASSIGNMENT_CANONICALS, ...SENSITIVE_NOTE_CANONICALS]) {
+    const field = db.get<{ id: number }>('SELECT id FROM dictionary_fields WHERE canonical_name=?', [canonical]);
+    const aliases = field
+      ? db
+          .all<{ alias: string }>('SELECT alias FROM dictionary_aliases WHERE field_id=?', [field.id])
+          .map((row) => row.alias)
+      : [];
+    const header = findColumn(headers, [canonical, ...aliases]);
+    if (header) policies[header] = 'never';
   }
   return policies;
 }
@@ -599,7 +618,14 @@ async function pullToMasterCopy(ctx: JobContext): Promise<unknown> {
     );
   }
 
-  const recorded = recordPullConflicts(ctx.runId, target, plan.conflicts);
+  const recorded = recordPullConflicts(ctx.runId, {
+    masterSpreadsheetId: target.masterSpreadsheetId,
+    masterName: target.masterName,
+    masterTab: target.masterTab,
+    sourceSpreadsheetId: target.captainSpreadsheetId,
+    sourceName: target.captainName,
+    sourceTab: target.captainTab,
+  }, plan.conflicts);
 
   if (approvedChanges.length === 0) {
     ctx.log({
@@ -774,7 +800,6 @@ async function applyConflictCopy(ctx: JobContext): Promise<unknown> {
 
   for (const group of groups.values()) {
     const { context } = group;
-    assertCopyMaster(context.spreadsheetId);
     ctx.reportProgress({ stage: 'reading', message: `Rechecking ${context.spreadsheetName} before writing.` });
     const [grid, sourceGrid] = await Promise.all([
       readGrid(context.spreadsheetId, context.tabName),
@@ -1024,11 +1049,25 @@ async function applyConflictCopy(ctx: JobContext): Promise<unknown> {
   };
 }
 
+export interface PullConflictSheetRefs {
+  masterSpreadsheetId: string;
+  masterName: string;
+  masterTab: string;
+  sourceSpreadsheetId: string;
+  sourceName: string;
+  sourceTab: string;
+}
+
 /**
  * Log pull disagreements to the Conflict Inbox, refreshing an existing open
  * entry for the same resident + column instead of piling up duplicates.
  */
-function recordPullConflicts(runId: number, target: SafeCopyTarget, conflicts: PullCellChange[]): number {
+export function recordPullConflicts(
+  runId: number,
+  refs: PullConflictSheetRefs,
+  conflicts: PullCellChange[],
+  options: { crossSheetDisagreement?: boolean } = {}
+): number {
   if (conflicts.length === 0) return 0;
   const existing = db.all<{ id: number; context_json: string }>(
     "SELECT id, context_json FROM conflicts WHERE status = 'open'"
@@ -1045,9 +1084,9 @@ function recordPullConflicts(runId: number, target: SafeCopyTarget, conflicts: P
     for (const conflict of conflicts) {
       const context: ConflictContext = {
         kind: 'pull_to_master',
-        spreadsheetId: target.masterSpreadsheetId,
-        spreadsheetName: target.masterName,
-        tabName: target.masterTab,
+        spreadsheetId: refs.masterSpreadsheetId,
+        spreadsheetName: refs.masterName,
+        tabName: refs.masterTab,
         residentId: conflict.residentId,
         residentName: conflict.residentName,
         column: conflict.column,
@@ -1060,15 +1099,17 @@ function recordPullConflicts(runId: number, target: SafeCopyTarget, conflicts: P
         captainNormalized: conflict.captainNormalized,
         fieldMeta: conflict.fieldMeta,
         suspectedTextCoercion: conflict.suspectedTextCoercion,
-        reason: conflict.suspectedTextCoercion
-          ? 'A text-safe field contains a numeric raw value; review possible Google Sheets coercion manually.'
-          : 'Master and captain values differ under the Field Dictionary type rules.',
+        reason: options.crossSheetDisagreement
+          ? 'Captain sheets disagree on this value; it was not written automatically.'
+          : conflict.suspectedTextCoercion
+            ? 'A text-safe field contains a numeric raw value; review possible Google Sheets coercion manually.'
+            : 'Master and captain values differ under the Field Dictionary type rules.',
         revalidationStatus: 'current',
-        sourceSpreadsheetId: target.captainSpreadsheetId,
-        sourceName: target.captainName,
-        sourceTab: target.captainTab,
+        sourceSpreadsheetId: refs.sourceSpreadsheetId,
+        sourceName: refs.sourceName,
+        sourceTab: refs.sourceTab,
       };
-      const key = `${target.masterSpreadsheetId}\u0000${conflict.residentId}\u0000${conflict.column}`;
+      const key = `${refs.masterSpreadsheetId}\u0000${conflict.residentId}\u0000${conflict.column}`;
       const existingId = openByKey.get(key);
       if (existingId) {
         db.run(
@@ -1084,7 +1125,7 @@ function recordPullConflicts(runId: number, target: SafeCopyTarget, conflicts: P
            VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?)`,
           [
             runId,
-            target.masterName,
+            refs.masterName,
             String(conflict.masterRow),
             conflict.column,
             conflict.residentId,

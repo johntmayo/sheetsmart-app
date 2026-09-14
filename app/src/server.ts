@@ -28,10 +28,19 @@ import registerZoneSheetRoutes from './routes/zoneSheets.routes';
 import registerOperationsRoutes from './routes/operations.routes';
 import registerAddressIntakeRoutes from './routes/addressIntake.routes';
 import registerFolderCleanupRoutes from './routes/folderCleanup.routes';
+import registerCaptainSyncRoutes from './routes/captainSync.routes';
+import registerCaptainPullRoutes from './routes/captainPull.routes';
+import registerMapboxContactAuditRoutes from './routes/mapboxContactAudit.routes';
+import { registerCaptainSyncTasks } from './captainSyncTasks';
+import { registerCaptainPullTasks } from './captainPullTasks';
+import { registerMapboxContactAuditTasks } from './mapboxContactAuditTasks';
 
 export function createApp(): Express {
   db.init();
   registerExecutionTasks();
+  registerCaptainSyncTasks();
+  registerCaptainPullTasks();
+  registerMapboxContactAuditTasks();
   registerCleanupTasks();
   startProcessing();
   setTimeout(() => void reconcileOrphanedSheetSafetyLocks(), 65_000).unref();
@@ -64,6 +73,9 @@ export function createApp(): Express {
   registerOperationsRoutes(api, deps);
   registerAddressIntakeRoutes(api, deps);
   registerFolderCleanupRoutes(api, deps);
+  registerCaptainSyncRoutes(api, deps);
+  registerCaptainPullRoutes(api, deps);
+  registerMapboxContactAuditRoutes(api, deps);
   app.use('/api', api);
 
   // Static frontend. Prefer the built React app (app/web/dist); fall back to the

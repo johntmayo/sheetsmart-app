@@ -882,7 +882,7 @@ function headerIndex(headers: string[], header: string | null): number {
   return -1;
 }
 
-function featureProp(feature: ZoneFeature, property: string): string {
+export function featureProp(feature: ZoneFeature, property: string): string {
   const props = feature.properties || {};
   const v = props[property];
   return v == null ? '' : String(v).trim();

@@ -29,6 +29,14 @@ export const config = {
   // reports "Not connected" until the owner supplies it.
   googleServiceAccountJsonB64: process.env.GOOGLE_SERVICE_ACCOUNT_JSON_B64 || '',
 
+  // Workspace user the service account impersonates via domain-wide delegation.
+  // Required to create/copy files into a My Drive folder. Leave empty when the
+  // captain folder lives inside a Shared Drive instead.
+  googleImpersonateUser: (process.env.GOOGLE_IMPERSONATE_USER || '').trim(),
+
+  // Shown in setup guidance when file creation is blocked.
+  googleDriveOwnerEmail: (process.env.GOOGLE_DRIVE_OWNER_EMAIL || 'info@altagether.org').trim(),
+
   // Mapbox token used ONLY to read the zone-polygon dataset (Workflow A, the
   // read-only Zone Health check — ZONE_PIPELINE_SPEC.md §5.2/§6). The token is a
   // secret and lives here in env, never in the database. The (non-secret)

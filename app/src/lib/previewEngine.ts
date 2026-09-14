@@ -188,3 +188,67 @@ function joinAnd(parts: string[]): string {
   if (parts.length === 2) return `${parts[0]} and ${parts[1]}`;
   return `${parts.slice(0, -1).join(', ')}, and ${parts[parts.length - 1]}`;
 }
+
+export interface PullToMasterImpact {
+  headline: string;
+  detail: string;
+  fills: number;
+  overwrites: number;
+  conflicts: number;
+  unmatchedResidents: number;
+  sheetsAffected: number;
+  sheetsScanned: number;
+  readErrors: number;
+  sheetsWithWrites: number;
+}
+
+export function summarizePullToMaster(
+  sheets: Array<{ fills: number; overwrites: number; conflicts: number; unmatched: number; errors: string[] }>,
+  options: { readErrors?: number; sheetsScanned?: number } = {}
+): PullToMasterImpact {
+  let fills = 0;
+  let overwrites = 0;
+  let conflicts = 0;
+  let unmatchedResidents = 0;
+  let sheetsAffected = 0;
+  let sheetsWithWrites = 0;
+
+  for (const sheet of sheets) {
+    const writes = sheet.fills + sheet.overwrites;
+    if (writes > 0 || sheet.conflicts > 0) sheetsAffected++;
+    if (writes > 0) sheetsWithWrites++;
+    fills += sheet.fills;
+    overwrites += sheet.overwrites;
+    conflicts += sheet.conflicts;
+    unmatchedResidents += sheet.unmatched;
+  }
+
+  const writeTotal = fills + overwrites;
+  const parts: string[] = [];
+  if (fills > 0) parts.push(`fill ${pl(fills, 'blank cell')}`);
+  if (overwrites > 0) parts.push(`replace ${pl(overwrites, 'existing value')}`);
+  if (conflicts > 0) parts.push(`log ${pl(conflicts, 'disagreement')} to the Conflict inbox`);
+  const headline =
+    parts.length > 0
+      ? `This would ${joinAnd(parts)} on the master from captain sheet edits.`
+      : conflicts > 0
+        ? `This would log ${pl(conflicts, 'disagreement')} to the Conflict inbox without writing cells.`
+        : 'No captain edits are ready to bring into the master.';
+  const detail =
+    unmatchedResidents > 0
+      ? `${pl(unmatchedResidents, 'resident')} on captain sheets has no matching master row — use Captain Import for those. Disagreements are never overwritten silently.`
+      : 'Disagreements are logged to the Conflict inbox instead of overwriting the master.';
+
+  return {
+    headline,
+    detail,
+    fills,
+    overwrites,
+    conflicts,
+    unmatchedResidents,
+    sheetsAffected,
+    sheetsScanned: options.sheetsScanned ?? sheets.length,
+    readErrors: options.readErrors ?? 0,
+    sheetsWithWrites,
+  };
+}

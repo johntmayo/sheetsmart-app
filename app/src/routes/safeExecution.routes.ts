@@ -59,6 +59,8 @@ import {
 } from '../mapbox';
 import { detectSheetZone, findColumn } from '../lib/columns';
 import { FOLDER_CLEANUP_TASK, REVERT_FOLDER_CLEANUP_TASK } from '../cleanupTasks';
+import { PUSH_FOLDER_TASK, PUSH_MISSING_FOLDER_TASK } from '../captainSyncTasks';
+import { MAPBOX_CONTACT_AUDIT_TASK } from '../mapboxContactAuditTasks';
 
 const SAFE_COPY_TARGET_KEY = 'safe_copy_execution_target';
 const SAFE_COPY_MOVE_TARGET_KEY = 'safe_copy_move_target';
@@ -575,7 +577,7 @@ export default function registerSafeExecutionRoutes(api: Router, { db }: Deps): 
 
   api.post('/conflicts/apply', (req: Request, res: Response) => {
     if (req.body?.confirmed !== true) {
-      return res.status(400).json({ error: 'Please confirm before writing captain values to the master copy.' });
+      return res.status(400).json({ error: 'Please confirm before writing captain values to the master.' });
     }
     const conflictIds = Array.isArray(req.body?.conflictIds)
       ? (req.body.conflictIds as unknown[]).map((id) => Number(id)).filter((id) => Number.isInteger(id) && id > 0)
@@ -938,6 +940,32 @@ export default function registerSafeExecutionRoutes(api: Router, { db }: Deps): 
           `SELECT COUNT(*) AS n FROM run_snapshots
            WHERE run_id=? AND operation IN ('row_append','row_delete')
              AND reverted_by_run_id IS NULL`,
+          [originalRunId]
+        )?.n || 0;
+    } else if (original.type === PUSH_MISSING_FOLDER_TASK) {
+      if (!['succeeded', 'failed', 'interrupted'].includes(original.status)) {
+        return res.status(409).json({ error: 'Wait for the live run to finish before reverting it.' });
+      }
+      revertType = REVERT_APPEND_COPY_TASK;
+      remaining =
+        db.get<{ n: number }>(
+          `SELECT COUNT(*) AS n FROM run_snapshots
+           WHERE run_id = ? AND operation = 'row_append' AND reverted_by_run_id IS NULL`,
+          [originalRunId]
+        )?.n || 0;
+    } else if (
+      original.type === PUSH_FOLDER_TASK ||
+      original.type === 'pull_folder' ||
+      original.type === MAPBOX_CONTACT_AUDIT_TASK
+    ) {
+      if (!['succeeded', 'failed', 'interrupted'].includes(original.status)) {
+        return res.status(409).json({ error: 'Wait for the live run to finish before reverting it.' });
+      }
+      revertType = REVERT_CELL_COPY_TASK;
+      remaining =
+        db.get<{ n: number }>(
+          `SELECT COUNT(*) AS n FROM run_snapshots
+           WHERE run_id = ? AND operation = 'cell_update' AND reverted_by_run_id IS NULL`,
           [originalRunId]
         )?.n || 0;
     } else if (original.type === FOLDER_CLEANUP_TASK) {

@@ -270,8 +270,14 @@ function undoWarning(type: string): string {
   if (type === 'move_residents_copy') {
     return 'SheetSmart will remove unchanged rows from the destination copy and restore unchanged rows to the source copy. Rows edited after the move are left in place and flagged for review.';
   }
-  if (type === 'pull_to_master_copy' || type === 'apply_conflict_copy') {
+  if (type === 'pull_to_master_copy' || type === 'apply_conflict_copy' || type === 'pull_folder') {
     return 'SheetSmart will put back the master values that this run replaced, but only where the cell is still unchanged. Anything edited afterward is left in place and flagged for review.';
+  }
+  if (type === 'mapbox_contact_audit') {
+    return 'SheetSmart will restore captain name, phone, email, and blank zone cells written by this run, but only where each cell is still unchanged.';
+  }
+  if (type === 'push_folder') {
+    return 'SheetSmart will restore captain cells filled from the master by this run, but only where each cell is still unchanged.';
   }
   return 'SheetSmart will remove only rows added by this run that are still unchanged. If anyone edited one of those rows afterward, it will be left in place and flagged for review.';
 }
@@ -292,11 +298,19 @@ function runTypeLabel(type: string): string {
     move_residents_copy: 'Practice: move residents',
     pull_to_master_copy: 'Practice: update master',
     pull_new_residents_copy: 'Practice: add residents to master',
-    apply_conflict_copy: 'Practice: resolve conflicts',
+    apply_conflict_copy: 'Resolve conflicts',
     apply_dashboard_deletion: 'Apply captain deletion',
     revert_dashboard_deletion: 'Restore captain deletion',
     address_intake: 'Add missing addresses',
     preview_address_intake: 'Preview missing addresses',
+    push_missing_folder: 'Add missing captain residents',
+    preview_push_missing_folder: 'Preview missing captain residents',
+    push_folder: 'Push master fields to captains',
+    preview_push_folder: 'Preview master field push',
+    pull_folder: 'Pull captain edits into master',
+    preview_pull_folder: 'Preview captain pull into master',
+    mapbox_contact_audit: 'Update captain contacts from Mapbox',
+    preview_mapbox_contact_audit: 'Preview Mapbox captain contacts',
   };
   return labels[type] ?? type.replaceAll('_', ' ');
 }
@@ -310,6 +324,18 @@ function undoScope(type: string): string {
   }
   if (type === 'address_intake') {
     return 'This affects only address-placeholder rows added to the real master by this intake.';
+  }
+  if (type === 'push_missing_folder') {
+    return 'This removes resident rows appended to captain sheets by this run.';
+  }
+  if (type === 'push_folder') {
+    return 'This restores captain cells filled from the master by this run.';
+  }
+  if (type === 'pull_folder') {
+    return 'This restores master cells updated from captain sheets by this run.';
+  }
+  if (type === 'mapbox_contact_audit') {
+    return 'This restores Mapbox captain-contact cells on the master and captain sheets included in this run.';
   }
   if (type === 'folder_zone_reconcile') {
     return 'This affects the real master and the real captain sheets included in that approved reconciliation.';
@@ -326,8 +352,11 @@ function undoScope(type: string): string {
   if (type === 'move_residents_copy') {
     return 'This affects only the two captain copies used by the re-zone move playbook.';
   }
-  if (type === 'pull_to_master_copy' || type === 'apply_conflict_copy') {
+  if (type === 'pull_to_master_copy') {
     return 'This affects only the master copy. Conflicts logged by the run stay in the Conflict inbox.';
+  }
+  if (type === 'apply_conflict_copy') {
+    return 'This restores the master cells this conflict decision wrote, only where they are still unchanged.';
   }
   if (type === 'pull_new_residents_copy') {
     return 'This affects only the master copy, removing the resident rows this run added.';
@@ -339,6 +368,10 @@ function undoButtonLabel(type: string): string {
   if (type === 'create_zone_sheets') return 'Undo created zone sheets';
   if (type === 'folder_captain_import') return 'Undo the captain import';
   if (type === 'address_intake') return 'Undo the address intake';
+  if (type === 'push_missing_folder') return 'Undo the captain row additions';
+  if (type === 'push_folder') return 'Undo the captain field fills';
+  if (type === 'pull_folder') return 'Undo the pulled master values';
+  if (type === 'mapbox_contact_audit') return 'Undo the Mapbox contact updates';
   if (type === 'folder_zone_reconcile') return 'Undo the reconciliation';
   if (type === 'folder_wide_cleanup') return 'Undo the folder cleanup';
   if (type === 'apply_dashboard_deletion') return 'Restore deleted records';
@@ -355,8 +388,11 @@ function canUndo(run: RunSummary): boolean {
   if (run.type === 'create_zone_sheets') {
     return settled && (run.unreverted_created_file_count ?? 0) > 0;
   }
-  if (run.type === 'folder_captain_import' || run.type === 'address_intake') {
+  if (run.type === 'folder_captain_import' || run.type === 'address_intake' || run.type === 'push_missing_folder') {
     return settled && (run.unreverted_append_count ?? 0) > 0;
+  }
+  if (run.type === 'push_folder' || run.type === 'pull_folder' || run.type === 'mapbox_contact_audit') {
+    return settled && (run.unreverted_cell_count ?? 0) > 0;
   }
   if (run.type === 'folder_zone_reconcile') {
     const remaining =
@@ -395,8 +431,11 @@ function isReverted(run: RunSummary): boolean {
   if (run.type === 'create_zone_sheets') {
     return (run.unreverted_created_file_count ?? 0) === 0;
   }
-  if (run.type === 'folder_captain_import' || run.type === 'address_intake') {
+  if (run.type === 'folder_captain_import' || run.type === 'address_intake' || run.type === 'push_missing_folder') {
     return (run.unreverted_append_count ?? 0) === 0;
+  }
+  if (run.type === 'push_folder' || run.type === 'pull_folder' || run.type === 'mapbox_contact_audit') {
+    return (run.unreverted_cell_count ?? 0) === 0;
   }
   if (run.type === 'folder_zone_reconcile') {
     return (

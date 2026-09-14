@@ -235,7 +235,9 @@ function ZoneHealth({ googleConfigured, hasMaster }: { googleConfigured: boolean
         Compares each resident&apos;s latitude/longitude against your {source?.username ? '' : 'Mapbox '}zone shapes and
         suggests Zone Name and neighborhood captain contact values. This works even if those columns are not on the
         master yet.{' '}
-        <strong>This is a read-only check — nothing is written to any sheet.</strong>
+        <strong>This is a read-only check — nothing is written to any sheet.</strong> To apply stale
+        captain name, phone, or email values from Mapbox, use Playbooks → Update captain contacts from
+        Mapbox.
       </p>
 
       {!loading && !tokenConfigured && (

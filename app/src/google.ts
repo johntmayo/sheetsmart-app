@@ -15,9 +15,10 @@ import {
   type CleanupSheet,
 } from './lib/folderCleanupEngine';
 
-// The service-account auth client, derived from googleapis so we don't depend
-// on google-auth-library directly.
-type GoogleAuthClient = InstanceType<typeof google.auth.GoogleAuth>;
+// Service-account auth, optionally with domain-wide delegation (JWT + subject).
+type GoogleAuthClient =
+  | InstanceType<typeof google.auth.GoogleAuth>
+  | InstanceType<typeof google.auth.JWT>;
 
 const SCOPES = [
   'https://www.googleapis.com/auth/spreadsheets', // read + write cells/columns
@@ -91,14 +92,64 @@ function loadCredentials(): ServiceAccountCredentials {
 export function getClients(): GoogleClients {
   if (cached) return cached;
   const credentials = loadCredentials();
-  const auth = new google.auth.GoogleAuth({ credentials, scopes: SCOPES });
-  cached = {
+  const subject = config.googleImpersonateUser;
+  const auth = subject
+    ? new google.auth.JWT({
+        email: credentials.client_email,
+        key: credentials.private_key,
+        scopes: SCOPES,
+        subject,
+      })
+    : new google.auth.GoogleAuth({ credentials, scopes: SCOPES });
+  const clients: GoogleClients = {
     auth,
     sheets: google.sheets({ version: 'v4', auth }),
     drive: google.drive({ version: 'v3', auth }),
     clientEmail: credentials.client_email as string,
   };
-  return cached;
+  cached = clients;
+  return clients;
+}
+
+export function getImpersonatedUser(): string | null {
+  return config.googleImpersonateUser || null;
+}
+
+export interface FolderLocation {
+  name: string;
+  driveId: string | null;
+  isSharedDrive: boolean;
+}
+
+export async function getFolderLocation(folderId: string): Promise<FolderLocation> {
+  const { drive } = getClients();
+  const res = await withRetry(() =>
+    drive.files.get({
+      fileId: folderId,
+      supportsAllDrives: true,
+      fields: 'id,name,driveId',
+    })
+  );
+  return {
+    name: res.data.name || folderId,
+    driveId: res.data.driveId || null,
+    isSharedDrive: Boolean(res.data.driveId),
+  };
+}
+
+/** Google blocks service-account file creation in My Drive. Shared Drive or impersonation is required. */
+export async function assertCanCreateFilesInFolder(folderId: string): Promise<FolderLocation> {
+  const location = await getFolderLocation(folderId);
+  if (location.isSharedDrive || config.googleImpersonateUser) return location;
+  const serviceAccount = getClientEmail() || 'the SheetSmart service account';
+  const ownerEmail = config.googleDriveOwnerEmail;
+  throw new Error(
+    `The captain folder "${location.name}" is in My Drive, not a Shared Drive. ` +
+      `${serviceAccount} can read shared folders there but Google does not let it create or copy files — ` +
+      `the "storage quota exceeded" message is misleading and does not mean ${ownerEmail} is full. ` +
+      `Fix it one of two ways: move the captain folder into a Shared Drive and add ${serviceAccount} as a member, ` +
+      `or enable domain-wide delegation with GOOGLE_IMPERSONATE_USER=${ownerEmail} (see app/README.md).`
+  );
 }
 
 // Print only the client_email for confirmation, never the private key.
@@ -565,6 +616,22 @@ export async function appendValues(
   };
 }
 
+function friendlyDriveCreateError(err: unknown): Error {
+  const message = String((err as { message?: string })?.message || err);
+  const lower = message.toLowerCase();
+  if (lower.includes('storage quota') || lower.includes('storagequotaexceeded')) {
+    const serviceAccount = getClientEmail() || 'the SheetSmart service account';
+    const ownerEmail = config.googleDriveOwnerEmail;
+    return new Error(
+      `Google Drive blocked file creation. This usually means the captain folder is in My Drive and ${serviceAccount} ` +
+        `is trying to own the new file — service accounts have no personal storage, so Google reports a misleading ` +
+        `"storage quota exceeded" error even when ${ownerEmail} has plenty of space. ` +
+        `Move the captain folder to a Shared Drive, or set GOOGLE_IMPERSONATE_USER=${ownerEmail} with domain-wide delegation.`
+    );
+  }
+  return err instanceof Error ? err : new Error(message);
+}
+
 /** Copy an existing spreadsheet into a Drive folder, preserving formatting and validations. */
 export async function copySpreadsheetToFolder(
   templateSpreadsheetId: string,
@@ -573,28 +640,33 @@ export async function copySpreadsheetToFolder(
   operationToken?: string
 ): Promise<CreatedSpreadsheetFile> {
   assertCurrentJobLease();
+  await assertCanCreateFilesInFolder(folderId);
   const { drive } = getClients();
-  const res = await withRetry(
-    () =>
-      drive.files.copy({
-        fileId: templateSpreadsheetId,
-        supportsAllDrives: true,
-        fields: 'id,name,webViewLink,modifiedTime',
-        requestBody: {
-          name,
-          parents: [folderId],
-          ...(operationToken ? { appProperties: { sheetsmartOperation: operationToken } } : {}),
-        },
-      }),
-    { attempts: 1 }
-  );
-  if (!res.data.id) throw new Error('Google Drive copied the template but returned no spreadsheet ID.');
-  return {
-    id: res.data.id,
-    name: res.data.name || name,
-    webViewLink: res.data.webViewLink || '',
-    modifiedTime: res.data.modifiedTime || '',
-  };
+  try {
+    const res = await withRetry(
+      () =>
+        drive.files.copy({
+          fileId: templateSpreadsheetId,
+          supportsAllDrives: true,
+          fields: 'id,name,webViewLink,modifiedTime',
+          requestBody: {
+            name,
+            parents: [folderId],
+            ...(operationToken ? { appProperties: { sheetsmartOperation: operationToken } } : {}),
+          },
+        }),
+      { attempts: 1 }
+    );
+    if (!res.data.id) throw new Error('Google Drive copied the template but returned no spreadsheet ID.');
+    return {
+      id: res.data.id,
+      name: res.data.name || name,
+      webViewLink: res.data.webViewLink || '',
+      modifiedTime: res.data.modifiedTime || '',
+    };
+  } catch (err) {
+    throw friendlyDriveCreateError(err);
+  }
 }
 
 export async function findSpreadsheetByOperationToken(
