@@ -13,7 +13,7 @@
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json",
     "test": "tsx --test test/*.test.ts",
-    "build:web": "npm --prefix web install && npm --prefix web run build",
+    "build:web": "npm --prefix web install --include=dev && npm --prefix web run build",
     "web:dev": "npm --prefix web run dev"
   },
   "dependencies": {

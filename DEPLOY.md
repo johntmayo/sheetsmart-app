@@ -51,7 +51,7 @@ Render deploys from this repository. Keep the repo **private**.
 | **Branch** | The branch you want live (e.g. `main` or your feature branch) |
 | **Root Directory** | `app` |
 | **Runtime** | Node |
-| **Build Command** | `npm install && npm run build && npm run build:web` |
+| **Build Command** | `npm install --include=dev && npm run build && npm install --include=dev --prefix web && npm run build --prefix web` |
 | **Start Command** | `npm start` |
 | **Instance type** | **Starter** or higher — **not Free** (free tier sleeps and kills long sheet jobs) |
 
@@ -80,7 +80,7 @@ In the service → **Environment**, add:
 | `GOOGLE_IMPERSONATE_USER` | `info@altagether.org` | Required for captain-sheet creation |
 | `MAPBOX_TOKEN` | *(copy from local `.env`)* | `pk.…` token with datasets:read |
 | `DATABASE_PATH` | `/var/data/sheetsmart.sqlite` | Must match the disk mount |
-| `NODE_ENV` | `production` | |
+| `NODE_ENV` | `production` | Runtime only; build command must use `npm install --include=dev` so TypeScript installs. |
 
 Do **not** set `DISABLE_AUTH`. Leave `PORT` unset — Render provides it.
 
