@@ -8,14 +8,21 @@ Estimated cost: about **$7/month** for a paid always-on web service plus a small
 
 ## Before you start
 
-Confirm these are already done locally (see `app/README.md` for detail):
+These are **one-time Google / Mapbox setup** steps. Your **local `.env`** is only for running on your laptop; **Render needs the same secrets copied into its Environment tab** (except paths like `DATABASE_PATH`).
 
-1. **Google service account** `sheetsmart-bot@…` created and base64 key in your local `.env`
-2. **Sheets shared** with the bot (master, captain folder, etc.)
-3. **Domain-wide delegation** authorized in Google Admin for client ID `112155719808160268631` with scopes:
+Check each item:
+
+1. **Google service account** — `sheetsmart-bot@sheetsmart-503108.iam.gserviceaccount.com` exists and you have its JSON as `GOOGLE_SERVICE_ACCOUNT_JSON_B64` (local `.env` **and** Render).
+   - **Verify:** SheetSmart Dashboard → **Connected as:** shows that email.
+2. **Sheets shared with the bot** — master spreadsheet, captain **Shared** folder, and template sheets: bot has **Editor**.
+   - **Verify:** Connections → **Test** succeeds locally (or after deploy, on Render).
+3. **Domain-wide delegation** (Google Admin) — client ID **`112155719808160268631`**, scopes:
    `https://www.googleapis.com/auth/spreadsheets,https://www.googleapis.com/auth/drive`
-4. **`GOOGLE_IMPERSONATE_USER=info@altagether.org`** in local `.env` (required for creating captain sheets)
-5. **Mapbox token** with `datasets:read` scope
+   - **Verify:** Admin → Security → API controls → Domain-wide delegation lists that client ID.
+4. **`GOOGLE_IMPERSONATE_USER=info@altagether.org`** on **Render** (and local `.env` for dev). Required to **create** captain sheets.
+5. **`MAPBOX_TOKEN`** on **Render** (and local `.env`). Token needs **datasets:read** (starts with `pk.`).
+
+If the Render **build** fails on `better-sqlite3`, the repo’s `app/.node-version` pins Node **22.18.0**. You can also set Render env **`NODE_VERSION=22.18.0`** and redeploy.
 
 ---
 
