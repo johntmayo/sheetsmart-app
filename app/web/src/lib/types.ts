@@ -23,6 +23,7 @@ export interface DictionaryField {
   is_identity: number; // 0 | 1
   is_sensitive: number; // 0 | 1
   is_text_safe: number; // 0 | 1
+  distribute_to_captain: number; // 0 | 1
   default_policy: Policy;
   notes: string;
   sort_order: number;
@@ -43,6 +44,10 @@ export interface RunSummary {
   unreverted_append_count?: number;
   unreverted_cell_count?: number;
   unreverted_delete_count?: number;
+  created_file_count?: number;
+  unreverted_created_file_count?: number;
+  cleanup_snapshot_count?: number;
+  unreverted_cleanup_count?: number;
 }
 
 export interface StatusResponse {
@@ -455,6 +460,169 @@ export interface QueuedRunResponse {
   runId: number;
   jobId: number;
   status: 'queued';
+}
+
+export interface FolderCleanupSheetPreview {
+  spreadsheetId: string;
+  spreadsheetName: string;
+  role: 'master' | 'captain';
+  tabName: string;
+  columnsToDelete: string[];
+  booleansToStandardize: number;
+  unitsToRepair: number;
+  cellChanges: Array<{ row: number; column: string; action: string }>;
+  formatUnitAsText: boolean;
+  noteFormulasNeutralized: number;
+  noteColumnsFormatted: string[];
+  blocks: Array<{ code: string; message: string; row?: number; column?: string }>;
+  canApply: boolean;
+}
+
+export interface FolderCleanupPreviewResponse {
+  runId: number;
+  generatedAt: string;
+  fingerprint: string;
+  totals: {
+    sheets: number;
+    sheetsChanging: number;
+    columnsDeleted: number;
+    booleansStandardized: number;
+    unitsRepaired: number;
+    unitColumnsFormatted: number;
+    noteFormulasNeutralized: number;
+    noteColumnsFormatted: number;
+    blocks: number;
+  };
+  readErrors: Array<{ spreadsheet: string; reason: string }>;
+  sheets: FolderCleanupSheetPreview[];
+  canApply: boolean;
+}
+
+export interface FolderAddressMove {
+  kind: 'move' | 'assign';
+  addressId: string;
+  displayAddress: string;
+  fromZone: string;
+  toZone: string;
+  fromSpreadsheetName: string;
+  toSpreadsheetName: string;
+  residents: Array<{
+    residentId: string;
+    residentName: string;
+    sourcePresent: boolean;
+    destinationPresent: boolean;
+    sensitiveData: Array<{ field: string; value: string }>;
+  }>;
+}
+
+export interface FolderReconcilePreviewResponse {
+  runId: number;
+  masterName: string;
+  masterTab: string;
+  generatedAt: string;
+  fingerprint: string;
+  moves: FolderAddressMove[];
+  blocked: Array<{ addressId: string; residentIds: string[]; reason: string }>;
+  registryErrors: string[];
+  readErrors: Array<{ spreadsheet: string; reason: string }>;
+  unchangedAddresses: number;
+  unassignedAddresses: number;
+  impact: {
+    addressesToMove: number;
+    residentsToMove: number;
+    blockedAddresses: number;
+    sheetsScanned: number;
+    readErrors: number;
+  };
+  canApply: boolean;
+}
+
+export interface CaptainImportResident {
+  residentId: string;
+  residentName: string;
+  addressPlaceholder: boolean;
+  captainRow: number;
+  property: string;
+  risk: DuplicateRisk;
+  riskReason: string;
+  matchedResidentId: string;
+  missingRequired: string[];
+}
+
+export interface CaptainImportAddress {
+  addressId: string;
+  displayAddress: string;
+  kind: 'new_address' | 'existing_address';
+  sourceSpreadsheetName: string;
+  sourceZone: string;
+  risk: DuplicateRisk;
+  residents: CaptainImportResident[];
+}
+
+export interface CaptainImportPreviewResponse {
+  runId: number;
+  masterName: string;
+  masterTab: string;
+  generatedAt: string;
+  addresses: CaptainImportAddress[];
+  blocked: Array<{
+    code?: 'missing_address_id' | 'duplicate_resident' | 'split_across_sheets' | 'address_id_mismatch' | 'missing_required_field';
+    addressId: string;
+    residentIds: string[];
+    reason: string;
+    displayAddress?: string;
+    sourceSpreadsheetId?: string;
+    sourceSpreadsheetName?: string;
+    sourceTabName?: string;
+    sourceRows?: number[];
+    masterAddressId?: string;
+  }>;
+  skipped: Array<{ residentId: string; column: string; reason: string; spreadsheetName: string }>;
+  columnsOnlyOnCaptains: string[];
+  errors: string[];
+  readErrors: Array<{ spreadsheet: string; reason: string }>;
+  impact: {
+    addresses: number;
+    newAddresses: number;
+    existingAddresses: number;
+    residents: number;
+    placeholders: number;
+    safeAddresses?: number;
+    safeResidents?: number;
+    warnedAddresses: number;
+    warnedResidents?: number;
+    blockedAddresses: number;
+    sheetsScanned: number;
+    readErrors: number;
+  };
+  canApply: boolean;
+}
+
+export interface MissingZoneSheetPreview {
+  zone: string;
+  fileName: string;
+  destinationFields: Record<string, string>;
+  addresses: Array<{ addressId: string; displayAddress: string }>;
+  residents: Array<{ residentId: string; residentName: string; addressId: string }>;
+}
+
+export interface ZoneSheetsPreviewResponse {
+  runId: number;
+  masterName: string;
+  masterTab: string;
+  templateSpreadsheetName: string;
+  zones: MissingZoneSheetPreview[];
+  blocked: Array<{ addressId: string; residentIds: string[]; reason: string }>;
+  errors: string[];
+  readErrors: Array<{ spreadsheet: string; reason: string }>;
+  impact: {
+    zones: number;
+    addresses: number;
+    residents: number;
+    sheetsScanned: number;
+    readErrors: number;
+  };
+  canApply: boolean;
 }
 
 // ---- Zone Health (Workflow A) — mirrors src/lib/zoneEngine.ts ----

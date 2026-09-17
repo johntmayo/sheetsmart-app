@@ -51,6 +51,34 @@ test('cell writes reject protected identity changes and ambiguous duplicate iden
   assert.match(plan.skipped[0].reason, /Duplicate resident_id/);
 });
 
+test('guarded writes preserve typed checkbox safety and source values', () => {
+  const target = [
+    ['resident_id', 'Wants_Updates', 'Notes'],
+    ['R-1', false, 'false'],
+  ];
+  const plan = planGuardedCellWrites(target, [
+    {
+      residentId: 'R-1',
+      column: 'Wants_Updates',
+      value: 'true',
+      policy: 'fill_blank',
+      fieldMeta: { dataType: 'checkbox' },
+    },
+    {
+      residentId: 'R-1',
+      column: 'Notes',
+      value: false,
+      policy: 'fill_blank',
+      fieldMeta: { dataType: 'text' },
+    },
+  ]);
+
+  assert.strictEqual(plan.writes.length, 0);
+  assert.strictEqual(plan.conflicts.length, 2);
+  assert.strictEqual(plan.conflicts[0].after, true);
+  assert.strictEqual(plan.conflicts[1].after, false);
+});
+
 test('append planning adds only identities absent from the current target', () => {
   const target = [
     ['resident_id', 'Resident Name', 'Phone'],
@@ -173,6 +201,16 @@ test('remapRowByHeaders joins by header name and leaves missing columns blank', 
   assert.deepStrictEqual(remapped, ['R-1', '', '626-555-0101']);
 });
 
+test('remapRowByHeaders omits master-only values from captain rows', () => {
+  const remapped = remapRowByHeaders(
+    ['resident_id', 'Resident Name', 'Latest Sale Price'],
+    ['R-1', 'Resident', 750000],
+    ['resident_id', 'Resident Name', 'Latest Sale Price'],
+    new Set(['resident_id', 'Resident Name'])
+  );
+  assert.deepStrictEqual(remapped, ['R-1', 'Resident', '']);
+});
+
 test('guarded deletes locate unique identities and sort bottom-up', () => {
   const target = [
     ['resident_id', 'ZoneName'],
@@ -199,8 +237,8 @@ test('guarded moves append to destination with destination ZoneName/NC fields an
     ['R-move', 'Mover', 'Zone A', 'Ada', '626-555-9999'],
   ];
   const to = [
-    ['resident_id', 'ZoneName', 'NC Name', 'Phone', 'Notes'],
-    ['R-existing', 'Zone B', 'Ben', '', 'already here'],
+    ['resident_id', 'Resident Name', 'ZoneName', 'NC Name', 'Phone', 'Notes'],
+    ['R-existing', 'Existing', 'Zone B', 'Ben', '', 'already here'],
   ];
   const plan = planGuardedMoves(from, to, ['R-move', 'R-existing', 'R-absent'], {
     ZoneName: 'Zone B',
@@ -210,7 +248,7 @@ test('guarded moves append to destination with destination ZoneName/NC fields an
   assert.strictEqual(plan.moves.length, 1);
   assert.deepStrictEqual(plan.moves[0], {
     residentId: 'R-move',
-    appendRow: ['R-move', 'Zone B', 'Ben Captain', '626-555-9999', ''],
+    appendRow: ['R-move', 'Mover', 'Zone B', 'Ben Captain', '626-555-9999', ''],
     sourceRow: ['R-move', 'Mover', 'Zone A', 'Ada', '626-555-9999'],
     sourceRowIndex: 2,
   });
@@ -218,6 +256,28 @@ test('guarded moves append to destination with destination ZoneName/NC fields an
     plan.skipped.map((row) => row.residentId),
     ['R-existing', 'R-absent']
   );
+});
+
+test('guarded moves block populated source columns that the destination would discard', () => {
+  const from = [
+    ['resident_id', 'Resident Name', 'Person Notes', 'ZoneName'],
+    ['R-private', 'Resident', 'Do not lose this note', 'Zone A'],
+  ];
+  const to = [['resident_id', 'Resident Name', 'ZoneName']];
+  const plan = planGuardedMoves(from, to, ['R-private'], { ZoneName: 'Zone B' });
+  assert.strictEqual(plan.moves.length, 0);
+  assert.match(plan.skipped[0].reason, /Person Notes/);
+});
+
+test('guarded moves reject duplicate source headers before deleting anything', () => {
+  const from = [
+    ['resident_id', 'Person Notes', 'Person Notes', 'ZoneName'],
+    ['R-private', 'first note', 'second note', 'Zone A'],
+  ];
+  const to = [['resident_id', 'Person Notes', 'ZoneName']];
+  const plan = planGuardedMoves(from, to, ['R-private'], { ZoneName: 'Zone B' });
+  assert.strictEqual(plan.moves.length, 0);
+  assert.match(plan.errors[0], /duplicate column/);
 });
 
 test('row restores re-append absent identities and conflict when values differ', () => {
@@ -236,4 +296,34 @@ test('row restores re-append absent identities and conflict when values differ',
   assert.strictEqual(plan.skipped.length, 1);
   assert.strictEqual(plan.conflicts.length, 1);
   assert.match(plan.conflicts[0].reason, /different values/);
+});
+
+test('row restores remap saved values when columns were reordered after deletion', () => {
+  const target = [['ZoneName', 'resident_id', 'Resident Name']];
+  const plan = planRowRestores(target, [
+    {
+      snapshotId: 4,
+      residentId: 'R-gone',
+      headers: ['resident_id', 'Resident Name', 'ZoneName'],
+      row: ['R-gone', 'Restored', 'Zone A'],
+    },
+  ]);
+  assert.deepStrictEqual(plan.appends[0].row, ['Zone A', 'R-gone', 'Restored']);
+});
+
+test('append undo compares saved values by header after columns are reordered', () => {
+  const target = [
+    ['ZoneName', 'resident_id', 'Resident Name'],
+    ['Zone A', 'R-added', 'Added Person'],
+  ];
+  const plan = planAppendRevert(target, [
+    {
+      snapshotId: 5,
+      residentId: 'R-added',
+      headers: ['resident_id', 'Resident Name', 'ZoneName'],
+      row: ['R-added', 'Added Person', 'Zone A'],
+    },
+  ]);
+  assert.strictEqual(plan.deletions.length, 1);
+  assert.strictEqual(plan.conflicts.length, 0);
 });

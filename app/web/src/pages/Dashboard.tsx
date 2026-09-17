@@ -16,6 +16,7 @@ import type {
   ZoneSourceStatus,
 } from '../lib/types';
 import { EmptyState, ErrorState, SectionHead, Spinner, StatusPill } from '../components/ui';
+import { OperationsPanel } from '../components/OperationsPanel';
 
 const SHEET_STATUS_KIND: Record<SheetStatus, string> = {
   Match: 'ok',
@@ -97,22 +98,22 @@ export function Dashboard() {
   return (
     <>
       <div className="callout">
-        Welcome back. This is the health view for the resident-data backbone — the master, the captain sheets, and the
-        sources it keeps honestly aligned. Nothing changes without a preview and your confirmation.
+        Welcome back. This dashboard checks the master resident sheet, captain zone sheets, and connected Google
+        sources. Nothing changes without a preview and your confirmation.
         {!google.configured && (
           <>
             {' '}
-            <strong>Google isn&apos;t connected yet</strong> — add the service-account key to{' '}
-            <span className="mono">.env</span> and restart.
+            <strong>Google isn&apos;t connected yet.</strong> Ask whoever set up SheetSmart to connect the Google
+            account, then refresh this page.
           </>
         )}
       </div>
 
       <div className="card-grid">
         {connCard(
-          'Google connection',
+          'Google access',
           google.configured,
-          google.configured ? `Service account: ${google.clientEmail ?? ''}` : 'No service-account key configured.',
+          google.configured ? `Connected as: ${google.clientEmail ?? ''}` : 'Google access is not set up.',
         )}
         {connCard('Master spreadsheet', conn.master.length > 0, conn.master.length ? conn.master[0].name : 'Not added yet')}
         {connCard(
@@ -121,18 +122,20 @@ export function Dashboard() {
           conn.captain_folder.length ? conn.captain_folder[0].name : 'Not added yet',
         )}
         {connCard(
-          'External sources',
+          'Outside address lists (optional)',
           conn.external.length > 0,
-          conn.external.length ? `${conn.external.length} connected` : 'Not added yet',
+          conn.external.length ? `${conn.external.length} connected for address intake` : 'Not needed for normal operation',
         )}
       </div>
 
-      <SectionHead title="Alignment">
+      <OperationsPanel />
+
+      <SectionHead title="Do captain sheets match the master?">
         <div className="card-meta" style={{ marginRight: 12 }}>
           {report ? `Last checked ${fmtWhen(report.generatedAt)}` : 'Not checked yet'}
         </div>
         <button className="btn" onClick={runAudit} disabled={!canAudit || running}>
-          {running ? 'Checking…' : report ? 'Re-check alignment' : 'Check alignment'}
+          {running ? 'Checking…' : report ? 'Run again' : 'Run sheet match check'}
         </button>
       </SectionHead>
 
@@ -219,7 +222,7 @@ function ZoneHealth({ googleConfigured, hasMaster }: { googleConfigured: boolean
 
   return (
     <>
-      <SectionHead title="Zones & captains">
+      <SectionHead title="Zone assignment check">
         <div className="card-meta" style={{ marginRight: 12 }}>
           {report ? `Last checked ${fmtWhen(report.generatedAt)}` : 'Not checked yet'}
         </div>
@@ -230,17 +233,17 @@ function ZoneHealth({ googleConfigured, hasMaster }: { googleConfigured: boolean
 
       <p className="reading-copy" style={{ marginTop: 0 }}>
         Compares each resident&apos;s latitude/longitude against your {source?.username ? '' : 'Mapbox '}zone shapes and
-        proposes ZoneName plus captain (NC) contact values. Works on the raw 48-column master even when those four
-        columns do not exist yet — they are treated as proposed outputs, not required inputs.{' '}
-        <strong>This is a read-only check — nothing is written to any sheet.</strong>
+        suggests Zone Name and neighborhood captain contact values. This works even if those columns are not on the
+        master yet.{' '}
+        <strong>This is a read-only check — nothing is written to any sheet.</strong> To apply stale
+        captain name, phone, or email values from Mapbox, use Playbooks → Update captain contacts from
+        Mapbox.
       </p>
 
       {!loading && !tokenConfigured && (
         <div className="callout" style={{ marginTop: 0 }}>
-          <strong>Mapbox isn&apos;t connected yet.</strong> Add a <span className="mono">MAPBOX_TOKEN</span> (a token with
-          the <span className="mono">datasets:read</span> scope) to <span className="mono">.env</span> and restart. The
-          zone dataset is <span className="mono">{source?.username ?? 'altagether'}</span> /{' '}
-          <span className="mono">{source?.datasetId ?? ''}</span>.
+          <strong>Mapbox isn&apos;t connected yet.</strong> Whoever manages SheetSmart needs to add a Mapbox access
+          token that can read the zone dataset.
         </div>
       )}
       {!loading && tokenConfigured && !hasMaster && (
@@ -287,44 +290,43 @@ function ZoneView({ report }: { report: ZoneReconcileReport }) {
     <>
       {enrichmentMode && (
         <div className="callout" style={{ marginTop: 16 }}>
-          <strong>Enrichment plan (read-only).</strong> This master tab is missing{' '}
+          <strong>Suggested new columns (preview only).</strong> This master tab is missing{' '}
           {proposedColumns.length > 0 ? proposedColumns.join(', ') : 'the derived zone/captain columns'}. SheetSmart
-          computed them from latitude/longitude + Mapbox shapes. No columns or cells will be written until a later,
-          approval-gated live step.
+          calculated them from latitude/longitude and the Mapbox zones. Nothing is being written.
         </div>
       )}
 
       <div className="card-grid" style={{ marginTop: 16 }}>
         <Metric
           value={s.columnsToAdd ?? proposedColumns.length}
-          label="Columns to add"
+          label="New columns needed"
           alert={(s.columnsToAdd ?? proposedColumns.length) > 0}
         />
         <Metric
           value={s.wouldFillZone}
-          label={enrichmentMode ? 'Would receive a zone' : 'Unzoned → would get a zone'}
+          label={enrichmentMode ? 'Would receive a zone' : 'No zone yet → would get one'}
           alert={s.wouldFillZone > 0}
         />
         <Metric value={s.wouldChangeZone} label="Would change zone" alert={s.wouldChangeZone > 0} />
         <Metric value={s.unassigned} label="In no zone (valid coords)" alert={s.unassigned > 0} />
       </div>
       <div className="card-grid" style={{ marginTop: 16 }}>
-        <Metric value={s.contactUpdates} label="Captain contact updates" alert={s.contactUpdates > 0} />
+        <Metric value={s.contactUpdates} label="Captain info would update" alert={s.contactUpdates > 0} />
         <Metric value={s.missingCoords} label="Missing coordinates" alert={s.missingCoords > 0} />
         <Metric value={s.matched} label="Already correct" />
         <Metric value={s.multiZone} label="In more than one zone" alert={s.multiZone > 0} />
       </div>
       <div className="card-grid" style={{ marginTop: 16 }}>
-        <Metric value={s.featuresLoaded} label="Zone shapes loaded" />
-        <Metric value={s.distinctZonesComputed} label="Zones computed" />
+        <Metric value={s.featuresLoaded} label="Map zones loaded" />
+        <Metric value={s.distinctZonesComputed} label="Zones found on map" />
         <Metric value={s.distinctZonesInMaster} label="Zones already on master" />
         <Metric value={s.totalResidentRows} label="Resident rows checked" />
       </div>
 
       {unresolvedRequired.length > 0 && (
         <p className="reading-copy">
-          <strong>Heads up:</strong> couldn&apos;t locate these required master column(s): {unresolvedRequired.join(', ')}.
-          Add an alias in the Field Dictionary so the check can find them.
+          <strong>Heads up:</strong> couldn&apos;t find these columns on the master: {unresolvedRequired.join(', ')}.
+          Add the sheet&apos;s column name under Fields so SheetSmart recognizes it.
         </p>
       )}
 
@@ -368,7 +370,7 @@ function ZoneDetailTable({
   return (
     <>
       <div className="section-head" style={{ marginTop: 24 }}>
-        <h2>{enrichmentMode ? 'Raw resident → computed zone & captain values' : 'What a zone refresh would change'}</h2>
+        <h2>{enrichmentMode ? 'Suggested zone and captain info per resident' : 'What a zone refresh would change'}</h2>
         <div className="spacer" />
         <span className="pill warn">
           {truncated
@@ -391,7 +393,7 @@ function ZoneDetailTable({
             <thead>
               <tr>
                 <th>What</th>
-                <th>resident_id</th>
+                <th>Resident ID</th>
                 <th>Resident Name</th>
                 <th className="num">Row</th>
                 <th>Current zone</th>
@@ -406,7 +408,7 @@ function ZoneDetailTable({
                   <tr key={`${r.residentId}-${r.masterRow}-${i}`}>
                     <td>
                       <span className={`pill ${meta.kind}`}>
-                        {enrichmentMode && r.outcome === 'fill' ? 'Would enrich' : meta.label}
+                        {enrichmentMode && r.outcome === 'fill' ? 'Would fill in' : meta.label}
                       </span>
                       {r.multiZone && (
                         <span className="pill warn" style={{ marginLeft: 6 }}>
@@ -417,7 +419,7 @@ function ZoneDetailTable({
                     <td className="mono">{r.residentId || '—'}</td>
                     <td>{r.residentName || '—'}</td>
                     <td className="num">{r.masterRow}</td>
-                    <td>{r.currentZone || (enrichmentMode ? '(column absent)' : '—')}</td>
+                    <td>{r.currentZone || (enrichmentMode ? '(not on sheet yet)' : '—')}</td>
                     <td>{r.computedZone || '—'}</td>
                     <td className="truncate">{formatOutputPreview(r)}</td>
                   </tr>

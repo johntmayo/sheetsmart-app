@@ -11,6 +11,7 @@ import {
   reconcileZones,
   planZoneEnrichment,
   planCaptainSheetMoves,
+  planFolderZoneReconciliation,
   ZONE_DETAIL_ROW_LIMIT,
   type ZoneFeatureCollection,
   type ZoneReconcileConfig,
@@ -380,4 +381,269 @@ test('planCaptainSheetMoves: proposes only residents whose computed zone is the 
   assert.deepStrictEqual(plan.candidates[0].destinationFields, plan.destinationFields);
   assert.ok(plan.skipped.some((row) => row.residentId === 'no-coords'));
   assert.ok(plan.fingerprint.length === 64);
+});
+
+test('planFolderZoneReconciliation: groups every resident at an address into one move', () => {
+  const master: Grid = [
+    ['resident_id', 'address_id', 'Resident Name', 'Address', 'Latitude', 'Longitude', 'ZoneName'],
+    ['r1', 'a1', 'One', '1 Main St', 25, 25, 'Zone A'],
+    ['r2', 'a1', 'Two', '1 Main St', 25, 25, 'Zone A'],
+    ['r3', 'a2', 'Three', '2 Main St', 5, 5, 'Zone A'],
+  ];
+  const zoneA: Grid = [
+    ['resident_id', 'address_id', 'Resident Name', 'ZoneName'],
+    ['r1', 'a1', 'One', 'Zone A'],
+    ['r2', 'a1', 'Two', 'Zone A'],
+    ['r3', 'a2', 'Three', 'Zone A'],
+  ];
+  const zoneB: Grid = [['resident_id', 'address_id', 'Resident Name', 'ZoneName']];
+  const plan = planFolderZoneReconciliation(
+    master,
+    [
+      { spreadsheetId: 'sa', spreadsheetName: 'Captain A', tabName: 'Sheet1', zone: 'Zone A', grid: zoneA },
+      { spreadsheetId: 'sb', spreadsheetName: 'Captain B', tabName: 'Sheet1', zone: 'Zone B', grid: zoneB },
+    ],
+    fc(),
+    CFG
+  );
+  assert.deepStrictEqual(plan.registryErrors, []);
+  assert.strictEqual(plan.moves.length, 1);
+  assert.strictEqual(plan.moves[0].addressId, 'a1');
+  assert.deepStrictEqual(plan.moves[0].residents.map((resident) => resident.residentId), ['r1', 'r2']);
+  assert.strictEqual(plan.unchangedAddresses, 1);
+  assert.ok(plan.fingerprint.length === 64);
+});
+
+test('planFolderZoneReconciliation: blocks every address containing a duplicate master resident ID', () => {
+  const master: Grid = [
+    ['resident_id', 'address_id', 'Resident Name', 'Latitude', 'Longitude', 'ZoneName'],
+    ['r1', 'a1', 'One', 25, 25, 'Zone A'],
+    ['r1', 'a2', 'Duplicate', 25, 25, 'Zone A'],
+  ];
+  const plan = planFolderZoneReconciliation(
+    master,
+    [
+      {
+        spreadsheetId: 'sa',
+        spreadsheetName: 'Captain A',
+        tabName: 'Sheet1',
+        zone: 'Zone A',
+        grid: [['resident_id'], ['r1']],
+      },
+      {
+        spreadsheetId: 'sb',
+        spreadsheetName: 'Captain B',
+        tabName: 'Sheet1',
+        zone: 'Zone B',
+        grid: [['resident_id']],
+      },
+    ],
+    fc(),
+    CFG
+  );
+  assert.strictEqual(plan.moves.length, 0);
+  assert.strictEqual(plan.blocked.length, 2);
+  assert.ok(plan.blocked.every((item) => /appears more than once on the master/.test(item.reason)));
+});
+
+test('planFolderZoneReconciliation: blocks a whole address when resident points resolve to different zones', () => {
+  const master: Grid = [
+    ['resident_id', 'address_id', 'Resident Name', 'Latitude', 'Longitude', 'ZoneName'],
+    ['r1', 'a1', 'One', 25, 25, 'Zone A'],
+    ['r2', 'a1', 'Two', 5, 5, 'Zone A'],
+  ];
+  const plan = planFolderZoneReconciliation(
+    master,
+    [
+      {
+        spreadsheetId: 'sa',
+        spreadsheetName: 'Captain A',
+        tabName: 'Sheet1',
+        zone: 'Zone A',
+        grid: [['resident_id'], ['r1'], ['r2']],
+      },
+      {
+        spreadsheetId: 'sb',
+        spreadsheetName: 'Captain B',
+        tabName: 'Sheet1',
+        zone: 'Zone B',
+        grid: [['resident_id']],
+      },
+    ],
+    fc(),
+    CFG
+  );
+  assert.strictEqual(plan.moves.length, 0);
+  assert.match(plan.blocked[0].reason, /different Mapbox zones/i);
+  assert.deepStrictEqual(plan.blocked[0].residentIds, ['r1', 'r2']);
+});
+
+test('planFolderZoneReconciliation: treats a placeholder resident as a valid new-address household', () => {
+  const master: Grid = [
+    ['resident_id', 'address_id', 'Resident Name', 'Latitude', 'Longitude', 'ZoneName'],
+    ['placeholder-1', 'new-address-1', 'Current Resident', 25, 25, 'Zone A'],
+  ];
+  const plan = planFolderZoneReconciliation(
+    master,
+    [
+      {
+        spreadsheetId: 'sa',
+        spreadsheetName: 'Captain A',
+        tabName: 'Sheet1',
+        zone: 'Zone A',
+        grid: [['resident_id'], ['placeholder-1']],
+      },
+      {
+        spreadsheetId: 'sb',
+        spreadsheetName: 'Captain B',
+        tabName: 'Sheet1',
+        zone: 'Zone B',
+        grid: [['resident_id']],
+      },
+    ],
+    fc(),
+    CFG
+  );
+  assert.strictEqual(plan.moves.length, 1);
+  assert.strictEqual(plan.moves[0].residents[0].residentId, 'placeholder-1');
+});
+
+test('planFolderZoneReconciliation: infers current zone from captain membership for the raw master', () => {
+  const rawMaster: Grid = [
+    ['resident_id', 'address_id', 'Resident Name', 'Latitude', 'Longitude'],
+    ['r1', 'a1', 'Resident', 25, 25],
+  ];
+  const plan = planFolderZoneReconciliation(
+    rawMaster,
+    [
+      {
+        spreadsheetId: 'sa',
+        spreadsheetName: 'Captain A',
+        tabName: 'Sheet1',
+        zone: 'Zone A',
+        grid: [['resident_id'], ['r1']],
+      },
+      {
+        spreadsheetId: 'sb',
+        spreadsheetName: 'Captain B',
+        tabName: 'Sheet1',
+        zone: 'Zone B',
+        grid: [['resident_id']],
+      },
+    ],
+    fc(),
+    { ...CFG, zoneHeader: null }
+  );
+  assert.deepStrictEqual(plan.registryErrors, []);
+  assert.strictEqual(plan.moves.length, 1);
+  assert.strictEqual(plan.moves[0].fromZone, 'Zone A');
+  assert.strictEqual(plan.moves[0].toZone, 'Zone B');
+});
+
+test('planFolderZoneReconciliation: accepts different coordinates when the household resolves to one zone', () => {
+  const master: Grid = [
+    ['resident_id', 'address_id', 'Resident Name', 'Latitude', 'Longitude', 'ZoneName'],
+    ['r1', 'a1', 'One', 24.9, 24.9, 'Zone A'],
+    ['r2', 'a1', 'Two', 25.1, 25.1, 'Zone A'],
+  ];
+  const plan = planFolderZoneReconciliation(
+    master,
+    [
+      {
+        spreadsheetId: 'sa',
+        spreadsheetName: 'Captain A',
+        tabName: 'Sheet1',
+        zone: 'Zone A',
+        grid: [['resident_id'], ['r1'], ['r2']],
+      },
+      {
+        spreadsheetId: 'sb',
+        spreadsheetName: 'Captain B',
+        tabName: 'Sheet1',
+        zone: 'Zone B',
+        grid: [['resident_id']],
+      },
+    ],
+    fc(),
+    CFG
+  );
+  assert.strictEqual(plan.moves.length, 1);
+  assert.deepStrictEqual(plan.moves[0].residents.map((resident) => resident.residentId), ['r1', 'r2']);
+});
+
+test('planFolderZoneReconciliation: carries sensitive source data into review and fingerprint', () => {
+  const master: Grid = [
+    ['resident_id', 'address_id', 'Resident Name', 'Latitude', 'Longitude', 'ZoneName'],
+    ['r1', 'a1', 'One', 25, 25, 'Zone A'],
+  ];
+  const source: Grid = [
+    ['resident_id', 'ZoneName', 'Person Notes', 'Outreach Log'],
+    ['r1', 'Zone A', 'Private context', 'Called resident'],
+  ];
+  const sheets = [
+    { spreadsheetId: 'sa', spreadsheetName: 'Captain A', tabName: 'Sheet1', zone: 'Zone A', grid: source },
+    {
+      spreadsheetId: 'sb',
+      spreadsheetName: 'Captain B',
+      tabName: 'Sheet1',
+      zone: 'Zone B',
+      grid: [['resident_id', 'ZoneName']],
+    },
+  ];
+  const plan = planFolderZoneReconciliation(master, sheets, fc(), CFG, {
+    sensitiveColumns: ['Person Notes', 'Outreach Log', 'Address Notes'],
+  });
+  assert.deepStrictEqual(plan.moves[0].residents[0].sensitiveData, [
+    { field: 'Person Notes', value: 'Private context' },
+    { field: 'Outreach Log', value: 'Called resident' },
+  ]);
+
+  const edited = source.map((row) => [...row]);
+  edited[1][2] = 'Changed after preview';
+  const changed = planFolderZoneReconciliation(
+    master,
+    [
+      { ...sheets[0], grid: edited },
+      sheets[1],
+    ],
+    fc(),
+    CFG,
+    { sensitiveColumns: ['Person Notes', 'Outreach Log', 'Address Notes'] }
+  );
+  assert.notStrictEqual(plan.fingerprint, changed.fingerprint);
+});
+
+test('planFolderZoneReconciliation: proposes newly zoned residents with no source-sheet deletion', () => {
+  const master: Grid = [
+    ['resident_id', 'address_id', 'Resident Name', 'Latitude', 'Longitude'],
+    ['r1', 'a1', 'Placeholder Resident', 25, 25],
+    ['r2', 'a1', 'Known Resident', 25.1, 25.1],
+  ];
+  const plan = planFolderZoneReconciliation(
+    master,
+    [
+      {
+        spreadsheetId: 'sa',
+        spreadsheetName: 'Captain A',
+        tabName: 'Sheet1',
+        zone: 'Zone A',
+        grid: [['resident_id']],
+      },
+      {
+        spreadsheetId: 'sb',
+        spreadsheetName: 'Captain B',
+        tabName: 'Sheet1',
+        zone: 'Zone B',
+        grid: [['resident_id']],
+      },
+    ],
+    fc(),
+    { ...CFG, zoneHeader: null }
+  );
+  assert.strictEqual(plan.moves.length, 1);
+  assert.strictEqual(plan.moves[0].kind, 'assign');
+  assert.strictEqual(plan.moves[0].fromZone, '');
+  assert.strictEqual(plan.moves[0].fromSpreadsheetId, '');
+  assert.strictEqual(plan.moves[0].toZone, 'Zone B');
+  assert.deepStrictEqual(plan.moves[0].residents.map((resident) => resident.residentId), ['r1', 'r2']);
 });

@@ -117,13 +117,13 @@ export default function registerZoneRoutes(api: Router, { db }: Deps): void {
       if (!google.isConfigured()) {
         return res.status(400).json({
           error:
-            'Google is not configured yet. Add GOOGLE_SERVICE_ACCOUNT_JSON_B64 to your .env (README Section A), then restart.',
+            'Google is not connected. Check the Dashboard for setup status.',
         });
       }
       if (!isMapboxConfigured()) {
         return res.status(400).json({
           error:
-            'Mapbox is not configured yet. Add MAPBOX_TOKEN (a token with the datasets:read scope) to your .env, then restart.',
+            'Mapbox is not connected. Zone checks need access to the Mapbox zone dataset.',
         });
       }
 

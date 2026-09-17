@@ -8,7 +8,7 @@ import { useToast } from '../components/Toast';
 const TYPE_LABEL: Record<ConnectionType, string> = {
   master: 'Master',
   captain_folder: 'Captain folder',
-  external: 'External',
+  external: 'Outside list / address intake',
 };
 
 export function Sources() {
@@ -19,7 +19,7 @@ export function Sources() {
   const [testing, setTesting] = useState<number | null>(null);
 
   async function del(c: Connection) {
-    if (!confirm(`Remove the "${c.name}" source? This only removes the pointer, not the Google file.`)) return;
+    if (!confirm(`Remove "${c.name}" from SheetSmart? The Google file will stay where it is.`)) return;
     await api.del(`/connections/${c.id}`);
     toast('Source removed', 'success');
     reload();
@@ -50,14 +50,14 @@ export function Sources() {
         </button>
       </SectionHead>
       <p className="reading-copy" style={{ marginTop: 0 }}>
-        A source is a named pointer to a Google spreadsheet, a Drive folder of captain sheets, or an external feed like
-        the sales tracker. Share each one with the service account as <strong>Editor</strong>, then test it here.
+        Each source links SheetSmart to a Google spreadsheet or folder. Share it with SheetSmart&apos;s Google account
+        as <strong>Editor</strong>, then test the connection here. Removing a source never deletes the Google file.
       </p>
 
       {rows.length === 0 ? (
         <EmptyState
           title="No sources yet"
-          body="Add your master spreadsheet, the captain sheets folder, and any external sources."
+          body="Add your master spreadsheet and captain sheets folder. Outside lists are optional and only needed for address intake."
         />
       ) : (
         <div className="table-wrap">
@@ -66,8 +66,8 @@ export function Sources() {
               <tr>
                 <th>Name</th>
                 <th>Type</th>
-                <th>Google ID</th>
-                <th>Tab</th>
+                <th>Spreadsheet or folder ID</th>
+                <th>Sheet tab</th>
                 <th />
               </tr>
             </thead>
@@ -163,11 +163,11 @@ function SourceForm({
           <select className="select" value={form.type} onChange={set('type')}>
             <option value="master">Master spreadsheet</option>
             <option value="captain_folder">Captain sheets folder</option>
-            <option value="external">External source spreadsheet</option>
+            <option value="external">Outside list / address-intake spreadsheet (optional)</option>
           </select>
         </div>
         <div className="field">
-          <label>Google ID</label>
+          <label>Spreadsheet or folder ID</label>
           <input
             className="input mono"
             value={form.google_id}
@@ -181,7 +181,7 @@ function SourceForm({
           </div>
         </div>
         <div className="field">
-          <label>Source tab (optional)</label>
+          <label>Sheet tab name (optional)</label>
           <input
             className="input"
             value={form.source_tab}
@@ -216,7 +216,7 @@ function TestResultModal({
   onClose: () => void;
 }) {
   return (
-    <Modal title={`${name} — connected`} onClose={onClose} wide>
+    <Modal title={`${name} — connection OK`} onClose={onClose} wide>
       {result.kind === 'folder' ? (
         <>
           <p>
@@ -244,8 +244,8 @@ function TestResultModal({
       ) : (
         <>
           <p>
-            <strong>{result.title}</strong> — read tab &ldquo;{result.tabRead}&rdquo; with{' '}
-            <strong>{result.headerCount}</strong> columns.
+            <strong>{result.title}</strong> — opened tab &ldquo;{result.tabRead}&rdquo; and found{' '}
+            <strong>{result.headerCount}</strong> column headers.
           </p>
           <div className="alias-list">
             {(result.headers ?? []).filter(Boolean).map((h, i) => (

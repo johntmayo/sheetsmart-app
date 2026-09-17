@@ -3,7 +3,7 @@
 // trusting stale row numbers from a preview and keeps every value behind the
 // write guard.
 
-import { cellValuesEqual, type CellValue } from './values';
+import { cellValuesEqual, type CellValue, type FieldCompareMeta, valueForTypedWrite } from './values';
 import type { Grid } from './mergeEngine';
 import { trimHeaders } from './mergeEngine';
 import { decideAppendCell, decideWrite, type Policy, type WriteAction } from './writeGuard';
@@ -13,6 +13,7 @@ export interface IdentityCellProposal {
   column: string;
   value: CellValue;
   policy?: string;
+  fieldMeta?: FieldCompareMeta;
 }
 
 export interface GuardedCellWrite {
@@ -57,6 +58,7 @@ export interface AppendSnapshot {
   snapshotId: number;
   residentId: string;
   row: CellValue[];
+  headers?: string[];
 }
 
 export interface RevertableAppend {
@@ -221,11 +223,13 @@ export function planGuardedCellWrites(
     proposedCells.add(cellKey);
 
     const before = targetData[rowIndex]?.[colIndex];
+    const after = valueForTypedWrite(proposal.value, proposal.fieldMeta);
     const decision = decideWrite({
       column: proposal.column,
       target: before,
-      source: proposal.value,
+      source: after,
       policy: proposal.policy,
+      fieldMeta: proposal.fieldMeta,
     });
     const guarded: GuardedCellWrite = {
       residentId,
@@ -233,7 +237,7 @@ export function planGuardedCellWrites(
       col: colIndex + 1,
       column: proposal.column,
       before,
-      after: proposal.value,
+      after,
       action: decision.action,
       policy: decision.effectivePolicy,
     };
@@ -371,10 +375,12 @@ export function planCellRevert(
 export function remapRowByHeaders(
   sourceHeaders: string[],
   sourceRow: CellValue[],
-  destHeaders: string[]
+  destHeaders: string[],
+  allowedDestinationColumns?: ReadonlySet<string>
 ): CellValue[] {
   return destHeaders.map((header) => {
     if (!header) return '';
+    if (allowedDestinationColumns && !allowedDestinationColumns.has(header)) return '';
     const index = sourceHeaders.indexOf(header);
     return index === -1 ? '' : (sourceRow[index] ?? '');
   });
@@ -449,6 +455,15 @@ export function planGuardedMoves(
   const plan: GuardedMovePlan = { moves: [], skipped: [], errors: [] };
   const fromHeaders = trimHeaders(fromData[0]);
   const toHeaders = trimHeaders(toData[0]);
+  const duplicateSourceHeaders = duplicateNonBlankHeaders(fromHeaders);
+  const duplicateDestinationHeaders = duplicateNonBlankHeaders(toHeaders);
+  if (duplicateSourceHeaders.length > 0) {
+    plan.errors.push(`Source sheet has duplicate column(s): ${duplicateSourceHeaders.join(', ')}`);
+  }
+  if (duplicateDestinationHeaders.length > 0) {
+    plan.errors.push(`Destination sheet has duplicate column(s): ${duplicateDestinationHeaders.join(', ')}`);
+  }
+  if (plan.errors.length > 0) return plan;
   const fromIdentity = buildIdentityIndex(fromData, fromHeaders, identityColumn);
   const toIdentity = buildIdentityIndex(toData, toHeaders, identityColumn);
   if (fromIdentity.headerIndex === -1) {
@@ -495,6 +510,19 @@ export function planGuardedMoves(
     }
 
     const sourceRow = fromHeaders.map((_header, colIndex) => fromData[fromRows[0]]?.[colIndex] ?? '');
+    const populatedSourceOnly = fromHeaders.filter(
+      (header, colIndex) =>
+        header &&
+        !toHeaders.includes(header) &&
+        String(sourceRow[colIndex] == null ? '' : sourceRow[colIndex]).trim() !== ''
+    );
+    if (populatedSourceOnly.length > 0) {
+      plan.skipped.push({
+        residentId,
+        reason: `Destination sheet is missing populated source column(s): ${populatedSourceOnly.join(', ')}`,
+      });
+      continue;
+    }
     const remapped = remapRowByHeaders(fromHeaders, sourceRow, toHeaders);
     for (const [column, value] of Object.entries(destinationFields)) {
       const colIndex = toHeaders.indexOf(column);
@@ -518,6 +546,17 @@ export function planGuardedMoves(
   return plan;
 }
 
+function duplicateNonBlankHeaders(headers: string[]): string[] {
+  const seen = new Set<string>();
+  const duplicates = new Set<string>();
+  for (const header of headers) {
+    if (!header) continue;
+    if (seen.has(header)) duplicates.add(header);
+    seen.add(header);
+  }
+  return [...duplicates].sort();
+}
+
 /**
  * Restore rows removed by a prior move. A row is re-appended only when the
  * resident_id is still absent. If the identity reappeared with different values,
@@ -539,6 +578,23 @@ export function planRowRestores(
   const seen = new Set(identity.rowsById.keys());
   for (const snapshot of snapshots) {
     const residentId = cleanIdentity(snapshot.residentId);
+    let expectedRow = snapshot.row;
+    if (snapshot.headers) {
+      const nonBlankSnapshotHeaders = snapshot.headers.filter(Boolean);
+      const nonBlankTargetHeaders = headers.filter(Boolean);
+      if (
+        new Set(nonBlankSnapshotHeaders).size !== nonBlankSnapshotHeaders.length ||
+        new Set(nonBlankTargetHeaders).size !== nonBlankTargetHeaders.length
+      ) {
+        plan.conflicts.push({
+          ...snapshot,
+          residentId,
+          reason: 'Columns changed and duplicate headers make a safe restore impossible',
+        });
+        continue;
+      }
+      expectedRow = remapRowByHeaders(snapshot.headers, snapshot.row, headers);
+    }
     if (!residentId) {
       plan.skipped.push({ ...snapshot, residentId, reason: `Blank ${identityColumn}` });
       continue;
@@ -556,7 +612,7 @@ export function planRowRestores(
     if (rows.length === 1) {
       const current = targetData[rows[0]] ?? [];
       const changed = headers.some(
-        (_header, colIndex) => !cellValuesEqual(current[colIndex], snapshot.row[colIndex])
+        (_header, colIndex) => !cellValuesEqual(current[colIndex], expectedRow[colIndex])
       );
       if (changed) {
         plan.conflicts.push({
@@ -579,7 +635,7 @@ export function planRowRestores(
     }
 
     const guardedRow = headers.map((column, index) => {
-      const value = snapshot.row[index];
+      const value = expectedRow[index];
       const decision = decideAppendCell({ column, source: value });
       return decision.willWrite ? value : '';
     });
@@ -610,6 +666,20 @@ export function planAppendRevert(
 
   for (const snapshot of snapshots) {
     const residentId = cleanIdentity(snapshot.residentId);
+    let expectedRow = snapshot.row;
+    if (snapshot.headers) {
+      const duplicateSaved = duplicateNonBlankHeaders(snapshot.headers);
+      const duplicateCurrent = duplicateNonBlankHeaders(headers);
+      if (duplicateSaved.length > 0 || duplicateCurrent.length > 0) {
+        plan.conflicts.push({
+          ...snapshot,
+          residentId,
+          reason: 'Columns changed and duplicate headers make a safe undo impossible',
+        });
+        continue;
+      }
+      expectedRow = remapRowByHeaders(snapshot.headers, snapshot.row, headers);
+    }
     const rows = identity.rowsById.get(residentId) ?? [];
     if (rows.length === 0) {
       plan.skipped.push({ ...snapshot, residentId, reason: 'Appended row is no longer present' });
@@ -622,7 +692,7 @@ export function planAppendRevert(
 
     const rowIndex = rows[0];
     const current = targetData[rowIndex] ?? [];
-    const changed = headers.some((_header, colIndex) => !cellValuesEqual(current[colIndex], snapshot.row[colIndex]));
+    const changed = headers.some((_header, colIndex) => !cellValuesEqual(current[colIndex], expectedRow[colIndex]));
     if (changed) {
       plan.conflicts.push({
         ...snapshot,

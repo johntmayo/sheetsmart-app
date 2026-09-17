@@ -1,5 +1,6 @@
 import type { Router, Request, Response } from 'express';
 import type { Deps } from '../types';
+import { isZoneDashboardSalesField, ZONE_DASHBOARD_SALES_NOTE } from '../lib/salesFieldPolicy';
 
 const VALID_TYPES = ['text', 'number', 'date', 'checkbox'];
 const VALID_POLICIES = ['fill_blank', 'overwrite', 'conflict', 'never'];
@@ -11,6 +12,7 @@ interface DictionaryFieldRow {
   is_identity: number;
   is_sensitive: number;
   is_text_safe: number;
+  distribute_to_captain: number;
   default_policy: string;
   notes: string;
   sort_order: number;
@@ -49,19 +51,22 @@ export default function registerDictionaryRoutes(api: Router, { db }: Deps): voi
       return res.status(400).json({ error: `default_policy must be one of ${VALID_POLICIES.join(', ')}.` });
     }
     const maxOrder = db.get<{ m: number }>('SELECT COALESCE(MAX(sort_order), -1) AS m FROM dictionary_fields')!.m;
+    const salesOwned = isZoneDashboardSalesField(canonical);
     try {
       const info = db.run(
         `INSERT INTO dictionary_fields
-           (canonical_name, data_type, is_identity, is_sensitive, is_text_safe, default_policy, notes, sort_order)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+           (canonical_name, data_type, is_identity, is_sensitive, is_text_safe, distribute_to_captain,
+            default_policy, notes, sort_order)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           canonical,
           body.data_type || 'text',
           body.is_identity ? 1 : 0,
           body.is_sensitive ? 1 : 0,
           body.is_text_safe ? 1 : 0,
-          body.default_policy || 'fill_blank',
-          String(body.notes || ''),
+          salesOwned ? 0 : body.distribute_to_captain === false ? 0 : 1,
+          salesOwned ? 'never' : body.default_policy || 'fill_blank',
+          salesOwned ? ZONE_DASHBOARD_SALES_NOTE : String(body.notes || ''),
           maxOrder + 1,
         ]
       );
@@ -86,14 +91,20 @@ export default function registerDictionaryRoutes(api: Router, { db }: Deps): voi
     if (body.default_policy && !VALID_POLICIES.includes(body.default_policy)) {
       return res.status(400).json({ error: `default_policy must be one of ${VALID_POLICIES.join(', ')}.` });
     }
-    const canonical = body.canonical_name != null ? String(body.canonical_name).trim() : existing.canonical_name;
+    const existingSalesOwned = isZoneDashboardSalesField(existing.canonical_name);
+    const canonical = existingSalesOwned
+      ? existing.canonical_name
+      : body.canonical_name != null
+        ? String(body.canonical_name).trim()
+        : existing.canonical_name;
     if (!canonical) return res.status(400).json({ error: 'canonical_name cannot be blank.' });
+    const salesOwned = existingSalesOwned || isZoneDashboardSalesField(canonical);
 
     try {
       db.run(
         `UPDATE dictionary_fields SET
            canonical_name = ?, data_type = ?, is_identity = ?, is_sensitive = ?,
-           is_text_safe = ?, default_policy = ?, notes = ?
+           is_text_safe = ?, distribute_to_captain = ?, default_policy = ?, notes = ?
          WHERE id = ?`,
         [
           canonical,
@@ -101,8 +112,13 @@ export default function registerDictionaryRoutes(api: Router, { db }: Deps): voi
           body.is_identity != null ? (body.is_identity ? 1 : 0) : existing.is_identity,
           body.is_sensitive != null ? (body.is_sensitive ? 1 : 0) : existing.is_sensitive,
           body.is_text_safe != null ? (body.is_text_safe ? 1 : 0) : existing.is_text_safe,
-          body.default_policy || existing.default_policy,
-          body.notes != null ? String(body.notes) : existing.notes,
+          salesOwned
+            ? 0
+            : body.distribute_to_captain != null
+            ? (body.distribute_to_captain ? 1 : 0)
+            : existing.distribute_to_captain,
+          salesOwned ? 'never' : body.default_policy || existing.default_policy,
+          salesOwned ? ZONE_DASHBOARD_SALES_NOTE : body.notes != null ? String(body.notes) : existing.notes,
           req.params.id,
         ]
       );
@@ -118,6 +134,10 @@ export default function registerDictionaryRoutes(api: Router, { db }: Deps): voi
   });
 
   api.delete('/dictionary/:id', (req: Request, res: Response) => {
+    const existing = db.get<DictionaryFieldRow>('SELECT * FROM dictionary_fields WHERE id = ?', [req.params.id]);
+    if (existing && isZoneDashboardSalesField(existing.canonical_name)) {
+      return res.status(409).json({ error: 'Zone Dashboard-owned sales fields are retained on the master and cannot be removed.' });
+    }
     db.run('DELETE FROM dictionary_fields WHERE id = ?', [req.params.id]);
     res.json({ ok: true });
   });

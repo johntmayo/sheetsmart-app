@@ -5,14 +5,24 @@
 
 import { google, sheets_v4, drive_v3 } from 'googleapis';
 import { config } from './config';
+import { assertCurrentJobLease } from './jobs';
+import {
+  LEGACY_ADDRESS_COLUMNS,
+  NOTE_TEXT_COLUMNS,
+  RETIRED_SALES_COLUMNS,
+  type CleanupCell,
+  type CleanupDependency,
+  type CleanupSheet,
+} from './lib/folderCleanupEngine';
 
-// The service-account auth client, derived from googleapis so we don't depend
-// on google-auth-library directly.
-type GoogleAuthClient = InstanceType<typeof google.auth.GoogleAuth>;
+// Service-account auth, optionally with domain-wide delegation (JWT + subject).
+type GoogleAuthClient =
+  | InstanceType<typeof google.auth.GoogleAuth>
+  | InstanceType<typeof google.auth.JWT>;
 
 const SCOPES = [
   'https://www.googleapis.com/auth/spreadsheets', // read + write cells/columns
-  'https://www.googleapis.com/auth/drive.readonly', // list files in the captain folder
+  'https://www.googleapis.com/auth/drive', // list, create, move, and safely undo app-created zone sheets
 ];
 
 interface ServiceAccountCredentials {
@@ -58,7 +68,7 @@ export function isConfigured(): boolean {
 function loadCredentials(): ServiceAccountCredentials {
   if (!isConfigured()) {
     throw new Error(
-      'Google is not configured. Set GOOGLE_SERVICE_ACCOUNT_JSON_B64 in your .env (see README Section A).'
+      'Google is not connected. Check the Dashboard for setup status.'
     );
   }
   let json: string;
@@ -82,14 +92,64 @@ function loadCredentials(): ServiceAccountCredentials {
 export function getClients(): GoogleClients {
   if (cached) return cached;
   const credentials = loadCredentials();
-  const auth = new google.auth.GoogleAuth({ credentials, scopes: SCOPES });
-  cached = {
+  const subject = config.googleImpersonateUser;
+  const auth = subject
+    ? new google.auth.JWT({
+        email: credentials.client_email,
+        key: credentials.private_key,
+        scopes: SCOPES,
+        subject,
+      })
+    : new google.auth.GoogleAuth({ credentials, scopes: SCOPES });
+  const clients: GoogleClients = {
     auth,
     sheets: google.sheets({ version: 'v4', auth }),
     drive: google.drive({ version: 'v3', auth }),
     clientEmail: credentials.client_email as string,
   };
-  return cached;
+  cached = clients;
+  return clients;
+}
+
+export function getImpersonatedUser(): string | null {
+  return config.googleImpersonateUser || null;
+}
+
+export interface FolderLocation {
+  name: string;
+  driveId: string | null;
+  isSharedDrive: boolean;
+}
+
+export async function getFolderLocation(folderId: string): Promise<FolderLocation> {
+  const { drive } = getClients();
+  const res = await withRetry(() =>
+    drive.files.get({
+      fileId: folderId,
+      supportsAllDrives: true,
+      fields: 'id,name,driveId',
+    })
+  );
+  return {
+    name: res.data.name || folderId,
+    driveId: res.data.driveId || null,
+    isSharedDrive: Boolean(res.data.driveId),
+  };
+}
+
+/** Google blocks service-account file creation in My Drive. Shared Drive or impersonation is required. */
+export async function assertCanCreateFilesInFolder(folderId: string): Promise<FolderLocation> {
+  const location = await getFolderLocation(folderId);
+  if (location.isSharedDrive || config.googleImpersonateUser) return location;
+  const serviceAccount = getClientEmail() || 'the SheetSmart service account';
+  const ownerEmail = config.googleDriveOwnerEmail;
+  throw new Error(
+    `The captain folder "${location.name}" is in My Drive, not a Shared Drive. ` +
+      `${serviceAccount} can read shared folders there but Google does not let it create or copy files — ` +
+      `the "storage quota exceeded" message is misleading and does not mean ${ownerEmail} is full. ` +
+      `Fix it one of two ways: move the captain folder into a Shared Drive and add ${serviceAccount} as a member, ` +
+      `or enable domain-wide delegation with GOOGLE_IMPERSONATE_USER=${ownerEmail} (see app/README.md).`
+  );
 }
 
 // Print only the client_email for confirmation, never the private key.
@@ -106,8 +166,8 @@ export interface RetryOptions {
   baseDelayMs?: number;
 }
 
-// Retry with exponential backoff + jitter (handoff 4.2). Wrap EVERY Sheets/
-// Drive call in this.
+// Retry with exponential backoff + jitter. Callers must use a single attempt
+// for mutations that are not safe to repeat after an ambiguous timeout.
 export async function withRetry<T>(fn: () => Promise<T>, { attempts = 8, baseDelayMs = 700 }: RetryOptions = {}): Promise<T> {
   let lastErr: unknown;
   for (let i = 0; i < attempts; i++) {
@@ -253,6 +313,199 @@ export async function readHeaders(spreadsheetId: string, tabName?: string): Prom
   return header.map((h: unknown) => String(h == null ? '' : h).trim());
 }
 
+/**
+ * Read raw/effective/formatted values and the formatting/validation metadata
+ * needed by the folder-cleanup safety audit and its schema-specific Undo.
+ */
+export async function readCleanupSheet(
+  spreadsheetId: string,
+  tabName?: string,
+  knownName = ''
+): Promise<CleanupSheet> {
+  const { sheets } = getClients();
+  const meta = await getSpreadsheetMeta(spreadsheetId);
+  const tab = tabName || meta.tabs[0] || '';
+  if (!tab) throw new Error(`${knownName || meta.title || spreadsheetId} has no readable tab.`);
+  const res = await withRetry(() =>
+    sheets.spreadsheets.get({
+      spreadsheetId,
+      ranges: [quoteTabName(tab)],
+      includeGridData: false,
+      fields: [
+        'spreadsheetId',
+        'properties.title',
+        'namedRanges',
+        'sheets(properties(sheetId,title,gridProperties(rowCount,columnCount))',
+        'merges,conditionalFormats,protectedRanges,filterViews,basicFilter,charts)',
+      ].join(','),
+    })
+  );
+  const source = (res.data.sheets || []).find((item) => item.properties?.title === tab);
+  if (!source) throw new Error(`${knownName || meta.title || spreadsheetId} no longer has tab "${tab}".`);
+  const props = source.properties;
+  const rowCount = props?.gridProperties?.rowCount || 0;
+  const columnCount = props?.gridProperties?.columnCount || 0;
+  const cells: CleanupCell[][] = [];
+  let columnMetadata: Array<Record<string, unknown>> = [];
+  // Keep each JSON payload far below V8's string limit while avoiding hundreds
+  // of quota-heavy requests for large master tabs.
+  const rowsPerRequest = 5000;
+  const endColumn = columnCount > 0 ? columnLetter(columnCount - 1) : 'A';
+  for (let startRow = 1; startRow <= rowCount; startRow += rowsPerRequest) {
+    const endRow = Math.min(rowCount, startRow + rowsPerRequest - 1);
+    const chunk = await withRetry(() =>
+      sheets.spreadsheets.get({
+        spreadsheetId,
+        ranges: [a1Range(tab, `A${startRow}:${endColumn}${endRow}`)],
+        includeGridData: true,
+        fields: [
+          'sheets(data(startRow,startColumn,columnMetadata',
+          'rowData.values(userEnteredValue,effectiveValue,formattedValue,userEnteredFormat,effectiveFormat,dataValidation,note)))',
+        ].join(','),
+      })
+    );
+    const grid = chunk.data.sheets?.[0]?.data?.[0];
+    const offset = grid?.startRow ?? startRow - 1;
+    if (columnMetadata.length === 0 && (grid?.columnMetadata || []).length > 0) {
+      columnMetadata = (grid?.columnMetadata || []).map((item) =>
+        JSON.parse(JSON.stringify(item)) as Record<string, unknown>
+      );
+    }
+    for (let rowOffset = 0; rowOffset < (grid?.rowData || []).length; rowOffset++) {
+      cells[offset + rowOffset] = (grid?.rowData?.[rowOffset]?.values || []).map((value) => ({
+      userEnteredValue: sheetExtendedValue(value.userEnteredValue),
+      effectiveValue: sheetExtendedValue(value.effectiveValue) as CleanupCell['effectiveValue'],
+      formattedValue: value.formattedValue ?? '',
+      numberFormat: (value.effectiveFormat?.numberFormat || value.userEnteredFormat?.numberFormat)
+        ? {
+            type: (value.effectiveFormat?.numberFormat || value.userEnteredFormat?.numberFormat)?.type || undefined,
+            pattern: (value.effectiveFormat?.numberFormat || value.userEnteredFormat?.numberFormat)?.pattern || undefined,
+          }
+        : undefined,
+      userEnteredFormat: value.userEnteredFormat
+        ? JSON.parse(JSON.stringify(value.userEnteredFormat)) as Record<string, unknown>
+        : undefined,
+      effectiveFormat: value.effectiveFormat
+        ? JSON.parse(JSON.stringify(value.effectiveFormat)) as Record<string, unknown>
+        : undefined,
+      dataValidation: value.dataValidation ? JSON.parse(JSON.stringify(value.dataValidation)) : undefined,
+      note: value.note || undefined,
+      }));
+    }
+  }
+  const dependencies: CleanupDependency[] = [];
+  const selectedHeaders = (cells[0] || []).map((cell) => String(cell.formattedValue || '').trim());
+  const noteIndexes = new Set(
+    selectedHeaders
+      .map((header, index) => ({ header, index }))
+      .filter((item) => NOTE_TEXT_COLUMNS.includes(item.header as typeof NOTE_TEXT_COLUMNS[number]))
+      .map((item) => item.index)
+  );
+  const selectedTabHasBlockingFormula = cells.some((row) =>
+    row.some((cell, index) =>
+      !noteIndexes.has(index) &&
+      Boolean(cell.userEnteredValue && typeof cell.userEnteredValue === 'object')
+    )
+  );
+  if (selectedTabHasBlockingFormula) {
+    dependencies.push({
+      kind: 'formula',
+      detail: 'At least one formula exists on this tab; column-reference restoration cannot be guaranteed.',
+      startColumn: 0,
+      endColumn: columnCount,
+    });
+  }
+  const structuralHeaders = new Set<string>([...LEGACY_ADDRESS_COLUMNS, ...RETIRED_SALES_COLUMNS]);
+  if (!selectedTabHasBlockingFormula && selectedHeaders.some((header) => structuralHeaders.has(header))) {
+    const formulaTab = await findFormulaOnOtherTab(spreadsheetId, tab);
+    if (formulaTab) {
+      dependencies.push({
+        kind: 'formula',
+        detail: `Formula cells exist on tab "${formulaTab}"; cross-tab references cannot be restored safely.`,
+        startColumn: 0,
+        endColumn: columnCount,
+      });
+    }
+  }
+  const addRanges = (kind: string, values: unknown[] | undefined, rangeOf: (value: any) => any) => {
+    for (const value of values || []) {
+      const range = rangeOf(value);
+      if (!range || range.sheetId !== props?.sheetId) continue;
+      dependencies.push({
+        kind,
+        detail: `${kind} spans columns ${(range.startColumnIndex || 0) + 1}-${range.endColumnIndex || columnCount}.`,
+        startColumn: range.startColumnIndex || 0,
+        endColumn: range.endColumnIndex || columnCount,
+      });
+    }
+  };
+  addRanges('merged range', source.merges, (value) => value);
+  addRanges(
+    'conditional format',
+    (source.conditionalFormats || []).flatMap((value) => value.ranges || []),
+    (value) => value
+  );
+  addRanges('protected range', source.protectedRanges, (value) => value.range);
+  addRanges('filter view', source.filterViews, (value) => value.range);
+  if (source.basicFilter?.range) addRanges('basic filter', [source.basicFilter], (value) => value.range);
+  // Charts and named ranges can carry column references not represented as a
+  // single simple grid range. Blocking all candidate deletes is conservative.
+  if ((source.charts || []).length > 0 || (res.data.namedRanges || []).some((value) => value.range?.sheetId === props?.sheetId)) {
+    dependencies.push({
+      kind: 'named range or chart',
+      detail: 'A named range or chart may depend on this tab.',
+      startColumn: 0,
+      endColumn: columnCount,
+    });
+  }
+  return {
+    spreadsheetId,
+    spreadsheetName: knownName || res.data.properties?.title || meta.title,
+    tabName: tab,
+    sheetId: props?.sheetId || 0,
+    rowCount,
+    columnCount,
+    cells,
+    columnMetadata,
+    dependencies,
+  };
+}
+
+async function findFormulaOnOtherTab(spreadsheetId: string, selectedTab: string): Promise<string | null> {
+  const { sheets } = getClients();
+  const properties = await getSheetProperties(spreadsheetId);
+  const rowsPerRequest = 1000;
+  for (const property of properties) {
+    if (property.title === selectedTab || property.rowCount <= 0 || property.columnCount <= 0) continue;
+    const endColumn = columnLetter(property.columnCount - 1);
+    for (let startRow = 1; startRow <= property.rowCount; startRow += rowsPerRequest) {
+      const endRow = Math.min(property.rowCount, startRow + rowsPerRequest - 1);
+      const response = await withRetry(() =>
+        sheets.spreadsheets.values.get({
+          spreadsheetId,
+          range: a1Range(property.title, `A${startRow}:${endColumn}${endRow}`),
+          valueRenderOption: 'FORMULA',
+        })
+      );
+      const hasFormula = (response.data.values || []).some((row) =>
+        row.some((value) => typeof value === 'string' && value.startsWith('='))
+      );
+      if (hasFormula) return property.title;
+    }
+  }
+  return null;
+}
+
+function sheetExtendedValue(value?: sheets_v4.Schema$ExtendedValue | null): CleanupCell['userEnteredValue'] {
+  if (!value) return null;
+  if (value.formulaValue != null) return { formulaValue: value.formulaValue };
+  if (value.boolValue != null) return value.boolValue;
+  if (value.numberValue != null) return value.numberValue;
+  if (value.stringValue != null) return value.stringValue;
+  if (value.errorValue != null) return String(value.errorValue.message || value.errorValue.type || '#ERROR!');
+  return null;
+}
+
 // ---- Write helpers (Phase C) ----
 // These are deliberately small transport wrappers. Safety decisions, snapshots,
 // approval checks, and durable logging belong to the execution engine.
@@ -267,18 +520,54 @@ export interface AppendValuesResult {
   updatedRows: number;
 }
 
+export interface CreatedSpreadsheetFile {
+  id: string;
+  name: string;
+  webViewLink: string;
+  modifiedTime: string;
+}
+
+export interface DrivePermissionSummary {
+  type: string;
+  role: string;
+  emailAddress: string;
+  domain: string;
+  allowFileDiscovery: boolean | null;
+}
+
+export async function listDrivePermissions(fileId: string): Promise<DrivePermissionSummary[]> {
+  const { drive } = getClients();
+  const res = await withRetry(() =>
+    drive.permissions.list({
+      fileId,
+      supportsAllDrives: true,
+      fields: 'permissions(type,role,emailAddress,domain,allowFileDiscovery)',
+    })
+  );
+  return (res.data.permissions || []).map((permission) => ({
+    type: permission.type || '',
+    role: permission.role || '',
+    emailAddress: permission.emailAddress || '',
+    domain: permission.domain || '',
+    allowFileDiscovery: permission.allowFileDiscovery ?? null,
+  }));
+}
+
 /** Update several A1 ranges in one Sheets API request. */
 export async function updateValues(spreadsheetId: string, updates: ValueRangeUpdate[]): Promise<number> {
   if (updates.length === 0) return 0;
+  assertCurrentJobLease();
   const { sheets } = getClients();
-  const res = await withRetry(() =>
-    sheets.spreadsheets.values.batchUpdate({
-      spreadsheetId,
-      requestBody: {
-        valueInputOption: 'RAW',
-        data: updates.map((update) => ({ range: update.range, values: update.values })),
-      },
-    })
+  const res = await withRetry(
+    () =>
+      sheets.spreadsheets.values.batchUpdate({
+        spreadsheetId,
+        requestBody: {
+          valueInputOption: 'RAW',
+          data: updates.map((update) => ({ range: update.range, values: update.values })),
+        },
+      }),
+    { attempts: 1 }
   );
   return res.data.totalUpdatedCells ?? 0;
 }
@@ -308,20 +597,133 @@ export async function appendValues(
   rows: unknown[][]
 ): Promise<AppendValuesResult> {
   if (rows.length === 0) return { updatedRange: '', updatedRows: 0 };
+  assertCurrentJobLease();
   const { sheets } = getClients();
-  const res = await withRetry(() =>
-    sheets.spreadsheets.values.append({
-      spreadsheetId,
-      range,
-      valueInputOption: 'RAW',
-      insertDataOption: 'INSERT_ROWS',
-      requestBody: { values: rows },
-    })
+  const res = await withRetry(
+    () =>
+      sheets.spreadsheets.values.append({
+        spreadsheetId,
+        range,
+        valueInputOption: 'RAW',
+        insertDataOption: 'INSERT_ROWS',
+        requestBody: { values: rows },
+      }),
+    { attempts: 1 }
   );
   return {
     updatedRange: res.data.updates?.updatedRange ?? '',
     updatedRows: res.data.updates?.updatedRows ?? 0,
   };
+}
+
+function friendlyDriveCreateError(err: unknown): Error {
+  const message = String((err as { message?: string })?.message || err);
+  const lower = message.toLowerCase();
+  if (lower.includes('storage quota') || lower.includes('storagequotaexceeded')) {
+    const serviceAccount = getClientEmail() || 'the SheetSmart service account';
+    const ownerEmail = config.googleDriveOwnerEmail;
+    return new Error(
+      `Google Drive blocked file creation. This usually means the captain folder is in My Drive and ${serviceAccount} ` +
+        `is trying to own the new file — service accounts have no personal storage, so Google reports a misleading ` +
+        `"storage quota exceeded" error even when ${ownerEmail} has plenty of space. ` +
+        `Move the captain folder to a Shared Drive, or set GOOGLE_IMPERSONATE_USER=${ownerEmail} with domain-wide delegation.`
+    );
+  }
+  return err instanceof Error ? err : new Error(message);
+}
+
+/** Copy an existing spreadsheet into a Drive folder, preserving formatting and validations. */
+export async function copySpreadsheetToFolder(
+  templateSpreadsheetId: string,
+  folderId: string,
+  name: string,
+  operationToken?: string
+): Promise<CreatedSpreadsheetFile> {
+  assertCurrentJobLease();
+  await assertCanCreateFilesInFolder(folderId);
+  const { drive } = getClients();
+  try {
+    const res = await withRetry(
+      () =>
+        drive.files.copy({
+          fileId: templateSpreadsheetId,
+          supportsAllDrives: true,
+          fields: 'id,name,webViewLink,modifiedTime',
+          requestBody: {
+            name,
+            parents: [folderId],
+            ...(operationToken ? { appProperties: { sheetsmartOperation: operationToken } } : {}),
+          },
+        }),
+      { attempts: 1 }
+    );
+    if (!res.data.id) throw new Error('Google Drive copied the template but returned no spreadsheet ID.');
+    return {
+      id: res.data.id,
+      name: res.data.name || name,
+      webViewLink: res.data.webViewLink || '',
+      modifiedTime: res.data.modifiedTime || '',
+    };
+  } catch (err) {
+    throw friendlyDriveCreateError(err);
+  }
+}
+
+export async function findSpreadsheetByOperationToken(
+  folderId: string,
+  operationToken: string
+): Promise<CreatedSpreadsheetFile | null> {
+  const { drive } = getClients();
+  const escapedToken = operationToken.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+  const parentClause = folderId ? `'${folderId}' in parents and ` : '';
+  const res = await withRetry(() =>
+    drive.files.list({
+      q: `${parentClause}trashed=false and mimeType='application/vnd.google-apps.spreadsheet' and appProperties has { key='sheetsmartOperation' and value='${escapedToken}' }`,
+      fields: 'files(id,name,webViewLink,modifiedTime)',
+      pageSize: 2,
+      supportsAllDrives: true,
+      includeItemsFromAllDrives: true,
+    })
+  );
+  const file = res.data.files?.[0];
+  if (!file?.id) return null;
+  return {
+    id: file.id,
+    name: file.name || '',
+    webViewLink: file.webViewLink || '',
+    modifiedTime: file.modifiedTime || '',
+  };
+}
+
+/** Clear cell contents while preserving formatting and data-validation rules. */
+export async function clearValues(spreadsheetId: string, range: string): Promise<void> {
+  assertCurrentJobLease();
+  const { sheets } = getClients();
+  await withRetry(() => sheets.spreadsheets.values.clear({ spreadsheetId, range, requestBody: {} }), { attempts: 1 });
+}
+
+export async function getDriveFile(
+  fileId: string
+): Promise<{ id: string; name: string; modifiedTime: string; trashed: boolean }> {
+  const { drive } = getClients();
+  const res = await withRetry(() =>
+    drive.files.get({ fileId, supportsAllDrives: true, fields: 'id,name,modifiedTime,trashed' })
+  );
+  return {
+    id: res.data.id || fileId,
+    name: res.data.name || '',
+    modifiedTime: res.data.modifiedTime || '',
+    trashed: Boolean(res.data.trashed),
+  };
+}
+
+export async function trashDriveFile(fileId: string): Promise<void> {
+  assertCurrentJobLease();
+  const { drive } = getClients();
+  await withRetry(
+    () => drive.files.update({ fileId, supportsAllDrives: true, requestBody: { trashed: true }, fields: 'id' }),
+    { attempts: 1 }
+  );
 }
 
 /** Apply structural requests such as deleting rows. */
@@ -330,14 +732,55 @@ export async function batchUpdateSpreadsheet(
   requests: sheets_v4.Schema$Request[]
 ): Promise<sheets_v4.Schema$Response[]> {
   if (requests.length === 0) return [];
+  assertCurrentJobLease();
   const { sheets } = getClients();
-  const res = await withRetry(() =>
-    sheets.spreadsheets.batchUpdate({
-      spreadsheetId,
-      requestBody: { requests },
-    })
+  const res = await withRetry(
+    () =>
+      sheets.spreadsheets.batchUpdate({
+        spreadsheetId,
+        requestBody: { requests },
+      }),
+    { attempts: 1 }
   );
   return res.data.replies ?? [];
+}
+
+/** Remove a temporary safety lock even if the originating job lease expired. */
+export async function removeProtectedRangeCleanup(
+  spreadsheetId: string,
+  protectedRangeId: number
+): Promise<void> {
+  const { sheets } = getClients();
+  await withRetry(
+    () =>
+      sheets.spreadsheets.batchUpdate({
+        spreadsheetId,
+        requestBody: {
+          requests: [{ deleteProtectedRange: { protectedRangeId } }],
+        },
+      }),
+    { attempts: 1 }
+  );
+}
+
+export async function listProtectedRanges(
+  spreadsheetId: string
+): Promise<Array<{ protectedRangeId: number; description: string }>> {
+  const { sheets } = getClients();
+  const res = await withRetry(() =>
+    sheets.spreadsheets.get({
+      spreadsheetId,
+      fields: 'sheets.protectedRanges(protectedRangeId,description)',
+    })
+  );
+  return (res.data.sheets || []).flatMap((sheet) =>
+    (sheet.protectedRanges || [])
+      .filter((range) => range.protectedRangeId != null)
+      .map((range) => ({
+        protectedRangeId: Number(range.protectedRangeId),
+        description: String(range.description || ''),
+      }))
+  );
 }
 
 export { SCOPES };

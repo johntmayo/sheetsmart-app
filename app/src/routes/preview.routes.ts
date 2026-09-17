@@ -1,9 +1,11 @@
 import type { Router, Request, Response } from 'express';
 import * as google from '../google';
 import type { Deps } from '../types';
+import { filterGridByTombstones, loadActiveTombstones } from '../lib/tombstones';
 import { buildSourceLookup, planCellFill, planPushMissingResidents, trimHeaders, type Grid } from '../lib/mergeEngine';
 import {
   buildCellFillConfig,
+  resolveFieldHeader,
   summarizeCellFill,
   summarizePushMissing,
   type DictField,
@@ -20,8 +22,11 @@ interface ConnectionRow {
 interface DictFieldRow {
   id: number;
   canonical_name: string;
+  data_type: 'text' | 'number' | 'date' | 'checkbox';
+  is_text_safe: number;
   is_identity: number;
   is_sensitive: number;
+  distribute_to_captain: number;
   default_policy: string;
 }
 
@@ -29,15 +34,9 @@ interface DictFieldRow {
 // a tested pure planner in mergeEngine (SHEETSMART_VISION_AND_ROADMAP.md §5.2).
 export const PREVIEW_PLAYBOOKS = [
   {
-    key: 'import_sales',
-    title: 'Pull in the newest sales data',
-    engine: 'import → master (cell-fill, matched by APN)',
-    kind: 'cell_fill',
-  },
-  {
     key: 'push_master',
-    title: 'Push the latest master data to captains',
-    engine: 'push → folder (cell-fill, matched by resident_id)',
+    title: 'Push resident and non-sales fields to captains',
+    engine: 'master → folder (resident/non-sales cell-fill, matched by resident_id)',
     kind: 'cell_fill',
   },
   {
@@ -78,17 +77,13 @@ export default function registerPreviewRoutes(api: Router, { db }: Deps): void {
       return res.status(400).json({ error: `Unknown playbook "${playbook}".` });
     }
     if (!google.isConfigured()) {
-      return res.status(400).json({ error: 'Google is not configured yet (README Section A).' });
+      return res.status(400).json({ error: 'Google is not connected. Check the Dashboard for setup status.' });
     }
 
     const master = db.get<ConnectionRow>("SELECT * FROM connections WHERE type = 'master' ORDER BY id LIMIT 1");
     const folder = db.get<ConnectionRow>("SELECT * FROM connections WHERE type = 'captain_folder' ORDER BY id LIMIT 1");
-    const external = db.get<ConnectionRow>("SELECT * FROM connections WHERE type = 'external' ORDER BY id LIMIT 1");
 
     if (!master) return res.status(400).json({ error: 'No master connection is configured (Sources).' });
-    if (playbook === 'import_sales' && !external) {
-      return res.status(400).json({ error: 'No external source (sales tracker) is configured (Sources).' });
-    }
     if ((playbook === 'push_master' || playbook === 'add_missing_residents') && !folder) {
       return res.status(400).json({ error: 'No captain folder is configured (Sources).' });
     }
@@ -106,12 +101,14 @@ export default function registerPreviewRoutes(api: Router, { db }: Deps): void {
       const masterGrid = await readSheetGrid(master.google_id, master.source_tab || undefined);
       let payload: unknown;
 
-      if (playbook === 'import_sales') {
-        payload = await previewImportSales(external!, masterGrid, dict);
-      } else if (playbook === 'push_master') {
+      if (playbook === 'push_master') {
         payload = await previewPushMaster(folder!, masterGrid, dict);
       } else {
-        payload = await previewAddMissing(folder!, masterGrid, dict);
+        payload = await previewAddMissing(
+          folder!,
+          filterGridByTombstones(masterGrid, loadActiveTombstones(db)),
+          dict
+        );
       }
 
       const impact = (payload as { impact: unknown }).impact;
@@ -129,66 +126,41 @@ export default function registerPreviewRoutes(api: Router, { db }: Deps): void {
 
 function loadDictionary(db: Deps['db']): DictField[] {
   const rows = db.all<DictFieldRow>(
-    'SELECT id, canonical_name, is_identity, is_sensitive, default_policy FROM dictionary_fields ORDER BY sort_order'
+    `SELECT id, canonical_name, data_type, is_text_safe, is_identity, is_sensitive, distribute_to_captain, default_policy
+     FROM dictionary_fields ORDER BY sort_order`
   );
   return rows.map((r) => ({
     canonical_name: r.canonical_name,
+    data_type: r.data_type,
+    is_text_safe: r.is_text_safe,
     is_identity: r.is_identity,
     is_sensitive: r.is_sensitive,
+    distribute_to_captain: r.distribute_to_captain,
     default_policy: r.default_policy,
     aliases: db.all<{ alias: string }>('SELECT alias FROM dictionary_aliases WHERE field_id = ?', [r.id]).map((a) => a.alias),
   }));
 }
 
 function sensitiveNames(dict: DictField[]): string[] {
-  return dict.filter((f) => f.is_sensitive === 1).map((f) => f.canonical_name);
+  return dict
+    .filter((f) => f.is_sensitive === 1 && f.distribute_to_captain === 1)
+    .map((f) => f.canonical_name);
 }
 
 // ---- Playbook implementations ----
 
-async function previewImportSales(external: ConnectionRow, masterGrid: Grid, dict: DictField[]) {
-  const salesGrid = await readSheetGrid(external.google_id, external.source_tab || undefined);
-  const cfg = buildCellFillConfig(trimHeaders(salesGrid[0]), trimHeaders(masterGrid[0]), 'APN', dict);
-  if (!cfg.matchSourceHeader) throw new Error('The sales tracker has no APN column to match on.');
-  if (!cfg.matchTargetHeader) throw new Error('The master has no APN column to match on.');
-
-  const { lookup } = buildSourceLookup(salesGrid, cfg.matchSourceHeader);
-  const plan = planCellFill(masterGrid, lookup, cfg.matchTargetHeader, cfg.columnMap, {
-    policies: cfg.policies,
-    protectedColumns: cfg.protectedColumns,
-    defaultPolicy: 'fill_blank',
-  });
-
-  const impact = summarizeCellFill([plan]);
-  return {
-    impact,
-    unmatchedFields: cfg.unmatchedFields,
-    target: 'master',
-    sheets: [
-      {
-        name: 'Master Data File',
-        url: '',
-        filled: plan.filled.length,
-        conflicts: plan.conflicts.length,
-        overwritten: plan.overwritten.length,
-        columnsToAdd: plan.columnsToAdd.length,
-        errors: plan.errors.map((e) => e.message),
-      },
-    ],
-  };
-}
-
 async function previewPushMaster(folder: ConnectionRow, masterGrid: Grid, dict: DictField[]) {
   const files = await google.listSpreadsheetsInFolder(folder.google_id);
   const masterHeaders = trimHeaders(masterGrid[0]);
+  const captainDict = dict.filter((field) => field.distribute_to_captain === 1);
   const plans = [];
   const sheets = [];
 
   // The master (source) side is constant across every captain sheet, so resolve
   // its resident_id header and build the lookup once.
-  const masterField = dict.find((f) => f.canonical_name === 'resident_id');
+  const masterField = captainDict.find((f) => f.canonical_name === 'resident_id');
   const masterMatchHeader = masterField
-    ? buildCellFillConfig(masterHeaders, masterHeaders, 'resident_id', dict).matchSourceHeader
+    ? buildCellFillConfig(masterHeaders, masterHeaders, 'resident_id', captainDict).matchSourceHeader
     : masterHeaders.includes('resident_id')
       ? 'resident_id'
       : null;
@@ -198,13 +170,14 @@ async function previewPushMaster(folder: ConnectionRow, masterGrid: Grid, dict: 
   for (const f of files) {
     try {
       const captainGrid = await readSheetGrid(f.id);
-      const cfg = buildCellFillConfig(masterHeaders, trimHeaders(captainGrid[0]), 'resident_id', dict);
+      const cfg = buildCellFillConfig(masterHeaders, trimHeaders(captainGrid[0]), 'resident_id', captainDict);
       if (!cfg.matchTargetHeader) {
         sheets.push({ name: f.name, url: f.webViewLink, filled: 0, conflicts: 0, overwritten: 0, columnsToAdd: 0, errors: ['No resident_id column to match on'] });
         continue;
       }
       const plan = planCellFill(captainGrid, lookup, cfg.matchTargetHeader, cfg.columnMap, {
         policies: cfg.policies,
+        fieldMeta: cfg.fieldMeta,
         protectedColumns: cfg.protectedColumns,
         defaultPolicy: 'fill_blank',
       });
@@ -235,7 +208,16 @@ async function previewAddMissing(folder: ConnectionRow, masterGrid: Grid, dict: 
   for (const f of files) {
     try {
       const captainGrid = await readSheetGrid(f.id);
-      const plan = planPushMissingResidents(captainGrid, masterGrid, { sensitiveColumns: sensitive });
+      const captainHeaders = trimHeaders(captainGrid[0]);
+      const distributedColumns = dict
+        .filter((field) => field.distribute_to_captain === 1)
+        .map((field) => resolveFieldHeader(field, captainHeaders))
+        .filter((header): header is string => Boolean(header));
+      const plan = planPushMissingResidents(
+        captainGrid,
+        masterGrid,
+        { sensitiveColumns: sensitive, distributedColumns }
+      );
       plans.push(plan);
       sheets.push({
         name: f.name,

@@ -68,8 +68,61 @@ test('unlisted columns default to conflict-only', () => {
   assert.strictEqual(d.willWrite, false);
 });
 
-test('equal values are a no-op (checkbox false vs blank)', () => {
-  assert.strictEqual(decideWrite({ column: 'X', target: 5, source: '5', policy: 'overwrite' }).action, 'equal');
+test('equal values are a typed no-op', () => {
+  assert.strictEqual(
+    decideWrite({
+      column: 'X',
+      target: 5,
+      source: '5',
+      policy: 'overwrite',
+      fieldMeta: { dataType: 'number' },
+    }).action,
+    'equal'
+  );
   assert.strictEqual(decideWrite({ column: 'X', target: false, source: '', policy: 'overwrite' }).action, 'skip'); // blank source
-  assert.strictEqual(decideWrite({ column: 'X', target: '1/2/2024', source: '2024-01-02', policy: 'overwrite' }).action, 'equal');
+  assert.strictEqual(
+    decideWrite({
+      column: 'X',
+      target: '1/2/2024',
+      source: '2024-01-02',
+      policy: 'overwrite',
+      fieldMeta: { dataType: 'date' },
+    }).action,
+    'equal'
+  );
+});
+
+test('fill_blank never silently changes unchecked to checked', () => {
+  const decision = decideWrite({
+    column: 'Wants_Updates',
+    target: false,
+    source: true,
+    policy: 'fill_blank',
+    fieldMeta: { dataType: 'checkbox' },
+  });
+  assert.strictEqual(decision.action, 'conflict');
+  assert.strictEqual(decision.willWrite, false);
+});
+
+test('blank and false are equivalent only for checkbox fields', () => {
+  assert.strictEqual(
+    decideWrite({
+      column: 'Former Resident',
+      target: '',
+      source: false,
+      policy: 'fill_blank',
+      fieldMeta: { dataType: 'checkbox' },
+    }).action,
+    'equal'
+  );
+  assert.strictEqual(
+    decideWrite({
+      column: 'Notes',
+      target: '',
+      source: false,
+      policy: 'fill_blank',
+      fieldMeta: { dataType: 'text' },
+    }).action,
+    'fill'
+  );
 });

@@ -10,12 +10,16 @@
 
 import { findColumn } from './columns';
 import type { CellFillResult, ColumnMap, PushMissingResult } from './mergeEngine';
+import type { FieldMetaMap } from './values';
 
 // The subset of a dictionary field the preview needs. Mirrors dictionary_fields.
 export interface DictField {
   canonical_name: string;
   is_identity: number; // 0 | 1
   is_sensitive: number; // 0 | 1
+  distribute_to_captain: number; // 0 | 1
+  data_type: 'text' | 'number' | 'date' | 'checkbox';
+  is_text_safe: number; // 0 | 1
   default_policy: string; // fill_blank | overwrite | conflict | never
   aliases: string[];
 }
@@ -25,6 +29,7 @@ export interface CellFillConfig {
   matchTargetHeader: string | null;
   columnMap: ColumnMap[];
   policies: Record<string, string>;
+  fieldMeta: FieldMetaMap;
   protectedColumns: string[];
   unmatchedFields: string[]; // logical fields that resolved on neither/one side
 }
@@ -51,6 +56,7 @@ export function buildCellFillConfig(
 
   const columnMap: ColumnMap[] = [];
   const policies: Record<string, string> = {};
+  const fieldMeta: FieldMetaMap = {};
   const protectedColumns: string[] = [];
   const unmatchedFields: string[] = [];
 
@@ -65,6 +71,11 @@ export function buildCellFillConfig(
     }
     columnMap.push({ source: sourceHeader, target: targetHeader });
     policies[targetHeader] = field.default_policy;
+    fieldMeta[targetHeader] = {
+      dataType: field.data_type,
+      isTextSafe: field.is_text_safe === 1,
+    };
+    fieldMeta[sourceHeader] = fieldMeta[targetHeader];
     if (field.is_identity === 1 || field.default_policy === 'never') {
       protectedColumns.push(targetHeader);
     }
@@ -75,7 +86,7 @@ export function buildCellFillConfig(
     protectedColumns.push(matchTargetHeader);
   }
 
-  return { matchSourceHeader, matchTargetHeader, columnMap, policies, protectedColumns, unmatchedFields };
+  return { matchSourceHeader, matchTargetHeader, columnMap, policies, fieldMeta, protectedColumns, unmatchedFields };
 }
 
 // ---- Plain-language impact summaries ----
@@ -176,4 +187,68 @@ function joinAnd(parts: string[]): string {
   if (parts.length === 1) return parts[0];
   if (parts.length === 2) return `${parts[0]} and ${parts[1]}`;
   return `${parts.slice(0, -1).join(', ')}, and ${parts[parts.length - 1]}`;
+}
+
+export interface PullToMasterImpact {
+  headline: string;
+  detail: string;
+  fills: number;
+  overwrites: number;
+  conflicts: number;
+  unmatchedResidents: number;
+  sheetsAffected: number;
+  sheetsScanned: number;
+  readErrors: number;
+  sheetsWithWrites: number;
+}
+
+export function summarizePullToMaster(
+  sheets: Array<{ fills: number; overwrites: number; conflicts: number; unmatched: number; errors: string[] }>,
+  options: { readErrors?: number; sheetsScanned?: number } = {}
+): PullToMasterImpact {
+  let fills = 0;
+  let overwrites = 0;
+  let conflicts = 0;
+  let unmatchedResidents = 0;
+  let sheetsAffected = 0;
+  let sheetsWithWrites = 0;
+
+  for (const sheet of sheets) {
+    const writes = sheet.fills + sheet.overwrites;
+    if (writes > 0 || sheet.conflicts > 0) sheetsAffected++;
+    if (writes > 0) sheetsWithWrites++;
+    fills += sheet.fills;
+    overwrites += sheet.overwrites;
+    conflicts += sheet.conflicts;
+    unmatchedResidents += sheet.unmatched;
+  }
+
+  const writeTotal = fills + overwrites;
+  const parts: string[] = [];
+  if (fills > 0) parts.push(`fill ${pl(fills, 'blank cell')}`);
+  if (overwrites > 0) parts.push(`replace ${pl(overwrites, 'existing value')}`);
+  if (conflicts > 0) parts.push(`log ${pl(conflicts, 'disagreement')} to the Conflict inbox`);
+  const headline =
+    parts.length > 0
+      ? `This would ${joinAnd(parts)} on the master from captain sheet edits.`
+      : conflicts > 0
+        ? `This would log ${pl(conflicts, 'disagreement')} to the Conflict inbox without writing cells.`
+        : 'No captain edits are ready to bring into the master.';
+  const detail =
+    unmatchedResidents > 0
+      ? `${pl(unmatchedResidents, 'resident')} on captain sheets has no matching master row — use Captain Import for those. Disagreements are never overwritten silently.`
+      : 'Disagreements are logged to the Conflict inbox instead of overwriting the master.';
+
+  return {
+    headline,
+    detail,
+    fills,
+    overwrites,
+    conflicts,
+    unmatchedResidents,
+    sheetsAffected,
+    sheetsScanned: options.sheetsScanned ?? sheets.length,
+    readErrors: options.readErrors ?? 0,
+    sheetsWithWrites,
+  };
 }

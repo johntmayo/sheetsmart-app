@@ -1,5 +1,7 @@
 import type { Router, Request, Response } from 'express';
 import type { Deps } from '../types';
+import { normalizeKey } from '../lib/columns';
+import { revalidateOpenPullConflicts } from '../executionTasks';
 
 // Run history + run review (spec "Run Review"). For a live run, the run record
 // and its detail rows ARE the permanent audit trail.
@@ -8,7 +10,8 @@ export default function registerRunRoutes(api: Router, { db }: Deps): void {
     res.json(
       db.all(
         `SELECT id, workflow_id, workflow_name, type, mode, status, actor,
-                summary_json, started_at, finished_at, created_at,
+                CASE WHEN mode='dry' THEN '{}' ELSE summary_json END AS summary_json,
+                started_at, finished_at, created_at,
                 (SELECT COUNT(*) FROM run_snapshots s WHERE s.run_id = runs.id) AS snapshot_count,
                 (SELECT COUNT(*) FROM run_snapshots s
                  WHERE s.run_id = runs.id AND s.operation = 'row_append'
@@ -18,7 +21,15 @@ export default function registerRunRoutes(api: Router, { db }: Deps): void {
                    AND s.reverted_by_run_id IS NULL) AS unreverted_cell_count,
                 (SELECT COUNT(*) FROM run_snapshots s
                  WHERE s.run_id = runs.id AND s.operation = 'row_delete'
-                   AND s.reverted_by_run_id IS NULL) AS unreverted_delete_count
+                   AND s.reverted_by_run_id IS NULL) AS unreverted_delete_count,
+                (SELECT COUNT(*) FROM run_created_files f
+                 WHERE f.run_id = runs.id) AS created_file_count,
+                (SELECT COUNT(*) FROM run_created_files f
+                 WHERE f.run_id = runs.id AND f.reverted_by_run_id IS NULL) AS unreverted_created_file_count
+               ,(SELECT COUNT(*) FROM cleanup_sheet_snapshots c
+                 WHERE c.run_id = runs.id) AS cleanup_snapshot_count
+               ,(SELECT COUNT(*) FROM cleanup_sheet_snapshots c
+                 WHERE c.run_id = runs.id AND c.reverted_by_run_id IS NULL) AS unreverted_cleanup_count
          FROM runs ORDER BY id DESC LIMIT 200`
       )
     );
@@ -39,6 +50,15 @@ export default function registerRunRoutes(api: Router, { db }: Deps): void {
        FROM run_snapshots WHERE run_id = ? GROUP BY operation`,
       [req.params.id]
     );
+    const cleanupSnapshot = db.get<{ n: number; remaining: number }>(
+      `SELECT COUNT(*) AS n,
+              SUM(CASE WHEN reverted_by_run_id IS NULL THEN 1 ELSE 0 END) AS remaining
+       FROM cleanup_sheet_snapshots WHERE run_id=?`,
+      [req.params.id]
+    );
+    if (cleanupSnapshot?.n) {
+      snapshotCounts.push({ operation: 'sheet_cleanup', n: cleanupSnapshot.n, remaining: cleanupSnapshot.remaining });
+    }
     res.json({ run, job, typeCounts, snapshotCounts });
   });
 
@@ -53,17 +73,46 @@ export default function registerRunRoutes(api: Router, { db }: Deps): void {
       where += ' AND type = ?';
       params.push(type);
     }
-    const rows = db.all(
-      `SELECT id, spreadsheet, row, column, resident_id, type, existing_value, incoming_value, message
+    const rows = db.all<{
+      id: number;
+      spreadsheet: string;
+      row: string;
+      column: string;
+      resident_id: string;
+      type: string;
+      existing_value: string;
+      incoming_value: string;
+      message: string;
+      value_redacted: number;
+    }>(
+      `SELECT id, spreadsheet, row, column, resident_id, type, existing_value, incoming_value, message, value_redacted
        FROM run_log_entries WHERE ${where} ORDER BY id LIMIT ? OFFSET ?`,
       [...params, limit, offset]
     );
-    res.json(rows);
+    const sensitiveKeys = new Set<string>();
+    for (const field of db.all<{ id: number; canonical_name: string }>(
+      'SELECT id, canonical_name FROM dictionary_fields WHERE is_sensitive=1'
+    )) {
+      sensitiveKeys.add(normalizeKey(field.canonical_name));
+      for (const alias of db.all<{ alias: string }>('SELECT alias FROM dictionary_aliases WHERE field_id=?', [field.id])) {
+        sensitiveKeys.add(normalizeKey(alias.alias));
+      }
+    }
+    res.json(
+      rows.map((row) => {
+        const redacted =
+          row.value_redacted === 1 || row.type === 'sensitive' || sensitiveKeys.has(normalizeKey(row.column));
+        return redacted
+          ? { ...row, existing_value: '[private field hidden]', incoming_value: '[private field hidden]', value_redacted: true }
+          : { ...row, value_redacted: false };
+      })
+    );
   });
 
   // Conflicts review (spec). Derived rows with open/resolved status.
-  api.get('/conflicts', (req: Request, res: Response) => {
+  api.get('/conflicts', async (req: Request, res: Response) => {
     const status = typeof req.query.status === 'string' ? req.query.status : 'open';
+    if (status === 'open') await revalidateOpenPullConflicts();
     res.json(
       db.all(
         `SELECT c.*, r.workflow_name, r.type AS run_type

@@ -12,9 +12,8 @@ export interface WorkflowTypeInfo {
 // The workflow types SheetSmart supports (handoff Section 7). Kept here as the
 // single source of truth for the UI's workflow-card catalog.
 export const WORKFLOW_TYPES: WorkflowTypeInfo[] = [
-  { type: 'import_to_master', label: 'Update Master From Sales Tracker', category: 'cell_fill', destructive: false },
-  { type: 'push_one_captain', label: 'Push Dashboard Fields → One Captain Sheet', category: 'cell_fill', destructive: false },
-  { type: 'push_folder', label: 'Push Dashboard Fields → Captain Sheets Folder', category: 'cell_fill', destructive: false },
+  { type: 'push_one_captain', label: 'Push Resident / Non-sales Fields → One Captain Sheet', category: 'cell_fill', destructive: false },
+  { type: 'push_folder', label: 'Push Resident / Non-sales Fields → Captain Sheets Folder', category: 'cell_fill', destructive: false },
   { type: 'push_missing_one', label: 'Push Missing Residents → One Captain Sheet', category: 'row_append', destructive: false },
   { type: 'push_missing_folder', label: 'Push Missing Residents → Captain Sheets Folder', category: 'row_append', destructive: false },
   { type: 'pull_missing_one', label: 'Pull Missing Rows ← One Captain Sheet', category: 'row_append', destructive: false },

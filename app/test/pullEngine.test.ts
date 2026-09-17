@@ -1,6 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert';
-import { planPullToMaster, planPullNewResidents, fingerprintPullChanges } from '../src/lib/pullEngine';
+import {
+  planPullToMaster,
+  planPullNewResidents,
+  planPullNewResidentsFromFolder,
+  fingerprintPullChanges,
+} from '../src/lib/pullEngine';
 import type { Grid } from '../src/lib/mergeEngine';
 
 const MASTER: Grid = [
@@ -134,6 +139,63 @@ test('planPullToMaster: missing identity column is a hard error', () => {
   assert.ok(plan.errors[0].includes('resident_id'));
 });
 
+test('planPullToMaster: captain sales columns can never fill or overwrite master sales data', () => {
+  const salesFields = [
+    'Address - For Sale',
+    'Address - Sold Since Fire',
+    'Latest Sale Date',
+    'Latest Sale Price',
+    'Latest New Owner',
+    'Lot SqFt',
+    'Sales History',
+  ];
+  const master: Grid = [
+    ['resident_id', 'Phone', ...salesFields],
+    ['R1', '', '', 'master sold', '', '100', '', '', 'master history'],
+  ];
+  const captain: Grid = [
+    ['resident_id', 'Phone', ...salesFields],
+    ['R1', '555-0001', 'yes', 'captain sold', '2026-01-01', '200', 'Buyer', '5000', 'captain history'],
+  ];
+  const policies = Object.fromEntries(['Phone', ...salesFields].map((field) => [field, 'overwrite']));
+
+  const plan = planPullToMaster(master, captain, { policies });
+
+  assert.deepStrictEqual(plan.columnsCompared, ['Phone']);
+  assert.deepStrictEqual(plan.fills.map((change) => change.column), ['Phone']);
+  assert.strictEqual(plan.overwrites.length, 0);
+  assert.strictEqual(plan.conflicts.length, 0);
+});
+
+test('planPullToMaster: dictionary types suppress only equivalent date and checkbox conflicts', () => {
+  const master: Grid = [
+    ['resident_id', 'Visit Date', 'Wants_Updates', 'Notes', '_SitusUnit', 'Zip'],
+    ['R1', 46211, false, 'false', 46211, '02134'],
+  ];
+  const captain: Grid = [
+    ['resident_id', 'Visit Date', 'Wants_Updates', 'Notes', '_SitusUnit', 'Zip'],
+    ['R1', '7/8/2026', 'false', false, '1/2', 2134],
+  ];
+  const plan = planPullToMaster(master, captain, {
+    policies: Object.fromEntries(master[0].map((column) => [String(column), 'fill_blank'])),
+    fieldMeta: {
+      'Visit Date': { dataType: 'date' },
+      Wants_Updates: { dataType: 'checkbox' },
+      Notes: { dataType: 'text' },
+      _SitusUnit: { dataType: 'text', isTextSafe: true },
+      Zip: { dataType: 'text', isTextSafe: true },
+    },
+  });
+
+  assert.deepStrictEqual(
+    plan.conflicts.map((conflict) => conflict.column).sort(),
+    ['Notes', 'Zip', '_SitusUnit'].sort()
+  );
+  assert.strictEqual(plan.conflicts.find((conflict) => conflict.column === '_SitusUnit')?.suspectedTextCoercion, true);
+  assert.ok(!plan.conflicts.some((conflict) => conflict.column === 'Visit Date'));
+  assert.ok(!plan.conflicts.some((conflict) => conflict.column === 'Wants_Updates'));
+});
+
 // ---- Captain-created residents ----
 
 // Two people share APN 100 on the master, which is normal: several residents
@@ -164,6 +226,35 @@ test('planPullNewResidents: proposes a genuinely new person and maps to master h
   // Ordered to the master's headers, and the captain-only column is dropped.
   assert.deepStrictEqual(candidate.row, ['C9', 'Alan Turing', '300', '30', 'Pine St', 'alan@example.com']);
   assert.deepStrictEqual(plan.columnsOnlyOnCaptain, ['Captain Notes']);
+});
+
+test('planPullNewResidents: blanks legacy captain sales values in new master rows', () => {
+  const master: Grid = [
+    ['resident_id', 'Resident Name', 'APN', 'Latest Sale Price', 'Sales History'],
+  ];
+  const captain: Grid = [
+    ['resident_id', 'Resident Name', 'APN', 'Latest Sale Price', 'Sales History'],
+    ['C9', 'New Person', '300', '999999', 'captain-maintained history'],
+  ];
+
+  const plan = planPullNewResidents(master, captain);
+
+  assert.deepStrictEqual(plan.candidates[0].row, ['C9', 'New Person', '300', '', '']);
+  assert.strictEqual(plan.candidates[0].filledColumns, 3);
+});
+
+test('planPullNewResidents: dictionary sales aliases are also blanked', () => {
+  const master: Grid = [['resident_id', 'Resident Name', 'Sale Amount Alias']];
+  const captain: Grid = [
+    ['resident_id', 'Resident Name', 'Sale Amount Alias'],
+    ['C9', 'New Person', '999999'],
+  ];
+
+  const plan = planPullNewResidents(master, captain, {
+    forbiddenColumns: ['Latest Sale Price', 'Sale Amount Alias'],
+  });
+
+  assert.deepStrictEqual(plan.candidates[0].row, ['C9', 'New Person', '']);
 });
 
 test('planPullNewResidents: a shared APN alone is never a duplicate signal', () => {
@@ -277,4 +368,218 @@ test('fingerprintPullChanges: stable for the plan, sensitive to captain edits', 
   const changed = planPullToMaster(MASTER, editedCaptain, { policies: POLICIES });
   assert.notStrictEqual(base.fingerprint, changed.fingerprint);
   assert.strictEqual(fingerprintPullChanges([]), fingerprintPullChanges([]));
+});
+
+test('planPullNewResidentsFromFolder: groups a new household by address_id', () => {
+  const master: Grid = [
+    ['address_id', 'resident_id', 'Resident Name', 'House', 'Street', 'Email'],
+    ['A1', 'M1', 'Existing Person', '10', 'Oak St', ''],
+  ];
+  const captain: Grid = [
+    ['address_id', 'resident_id', 'Resident Name', 'House', 'Street', 'Email'],
+    ['A2', 'C1', 'New Person One', '20', 'Pine St', 'one@example.com'],
+    ['A2', 'C2', 'New Person Two', '20', 'Pine St', 'two@example.com'],
+  ];
+  const plan = planPullNewResidentsFromFolder(master, [
+    { spreadsheetId: 'S1', spreadsheetName: 'Zone 1', tabName: 'Sheet1', zone: 'Zone 1', grid: captain },
+  ]);
+
+  assert.deepStrictEqual(plan.errors, []);
+  assert.strictEqual(plan.addresses.length, 1);
+  assert.strictEqual(plan.addresses[0].addressId, 'A2');
+  assert.strictEqual(plan.addresses[0].kind, 'new_address');
+  assert.deepStrictEqual(plan.addresses[0].residents.map((resident) => resident.residentId), ['C1', 'C2']);
+});
+
+test('planPullNewResidentsFromFolder: distinguishes a new resident at an existing address', () => {
+  const master: Grid = [
+    ['address_id', 'resident_id', 'Resident Name'],
+    ['A1', 'M1', 'Existing Person'],
+  ];
+  const captain: Grid = [
+    ['address_id', 'resident_id', 'Resident Name'],
+    ['A1', 'M1', 'Existing Person'],
+    ['A1', 'C1', 'New Housemate'],
+  ];
+  const plan = planPullNewResidentsFromFolder(master, [
+    { spreadsheetId: 'S1', spreadsheetName: 'Zone 1', tabName: 'Sheet1', zone: 'Zone 1', grid: captain },
+  ]);
+
+  assert.strictEqual(plan.addresses[0].kind, 'existing_address');
+  assert.deepStrictEqual(plan.addresses[0].residents.map((resident) => resident.residentId), ['C1']);
+});
+
+test('planPullNewResidentsFromFolder: blocks the same situs under a different address_id', () => {
+  const master: Grid = [
+    ['address_id', 'resident_id', 'Resident Name', '_SitusHouseNo', '_SitusDirection', '_SitusStreet', '_SitusUnit'],
+    ['A1', 'M1', 'Existing Person', '5000', '', 'Rising Hill Rd', ''],
+  ];
+  const captain: Grid = [
+    ['address_id', 'resident_id', 'Resident Name', '_SitusHouseNo', '_SitusDirection', '_SitusStreet', '_SitusUnit'],
+    ['A2', 'C1', '', '5000', '', 'Rising Hill Rd', ''],
+  ];
+
+  const plan = planPullNewResidentsFromFolder(
+    master,
+    [{ spreadsheetId: 'S1', spreadsheetName: 'Zone 136', tabName: 'Sheet1', zone: 'Zone 136', grid: captain }],
+    { requiredColumns: [] }
+  );
+
+  assert.strictEqual(plan.addresses.length, 0);
+  assert.match(plan.blocked[0].reason, /already exists on the master as address_id A1/i);
+});
+
+test('planPullNewResidentsFromFolder: blocks duplicate identities across captain sheets', () => {
+  const master: Grid = [['address_id', 'resident_id', 'Resident Name']];
+  const first: Grid = [
+    ['address_id', 'resident_id', 'Resident Name'],
+    ['A1', 'C1', 'Ambiguous Person'],
+  ];
+  const second: Grid = [
+    ['address_id', 'resident_id', 'Resident Name'],
+    ['A1', 'C1', 'Ambiguous Person'],
+  ];
+  const plan = planPullNewResidentsFromFolder(master, [
+    { spreadsheetId: 'S1', spreadsheetName: 'Zone 1', tabName: 'Sheet1', zone: 'Zone 1', grid: first },
+    { spreadsheetId: 'S2', spreadsheetName: 'Zone 2', tabName: 'Sheet1', zone: 'Zone 2', grid: second },
+  ]);
+
+  assert.strictEqual(plan.addresses.length, 0);
+  assert.ok(plan.blocked.some((block) => /appears more than once/i.test(block.reason)));
+});
+
+test('planPullNewResidentsFromFolder: blocks rows without address_id', () => {
+  const master: Grid = [['address_id', 'resident_id', 'Resident Name']];
+  const captain: Grid = [
+    ['address_id', 'resident_id', 'Resident Name'],
+    ['', 'C1', 'No Address Identity'],
+  ];
+  const plan = planPullNewResidentsFromFolder(master, [
+    { spreadsheetId: 'S1', spreadsheetName: 'Zone 1', tabName: 'Sheet1', zone: 'Zone 1', grid: captain },
+  ]);
+
+  assert.strictEqual(plan.addresses.length, 0);
+  assert.match(plan.blocked[0].reason, /no address_id/i);
+});
+
+test('planPullNewResidentsFromFolder: permits address-only placeholder rows when configured', () => {
+  const master: Grid = [['address_id', 'resident_id', 'Resident Name', 'House', 'Street']];
+  const captain: Grid = [
+    ['address_id', 'resident_id', 'Resident Name', 'House', 'Street'],
+    ['A2', 'C1', '', '20', 'Pine St'],
+  ];
+  const plan = planPullNewResidentsFromFolder(
+    master,
+    [{ spreadsheetId: 'S1', spreadsheetName: 'Zone 1', tabName: 'Sheet1', zone: 'Zone 1', grid: captain }],
+    { requiredColumns: [] }
+  );
+
+  assert.strictEqual(plan.blocked.length, 0);
+  assert.strictEqual(plan.addresses.length, 1);
+  assert.strictEqual(plan.addresses[0].residents[0].residentName, '');
+});
+
+test('planPullNewResidentsFromFolder: does not treat Dashboard placeholders as duplicate people', () => {
+  const master: Grid = [
+    ['address_id', 'resident_id', 'Resident Name', 'Address Placeholder', 'APN', 'House', 'Street'],
+    ['A1', 'M1', 'Placeholder Resident', true, '100', '10', 'Oak St'],
+  ];
+  const captain: Grid = [
+    ['address_id', 'resident_id', 'Resident Name', 'Address Placeholder', 'APN', 'House', 'Street'],
+    ['A2', 'C1', 'placeholder resident', 'TRUE', '200', '20', 'Pine St'],
+  ];
+  const plan = planPullNewResidentsFromFolder(
+    master,
+    [{ spreadsheetId: 'S1', spreadsheetName: 'Zone 1', tabName: 'Sheet1', zone: 'Zone 1', grid: captain }],
+    { requiredColumns: [] }
+  );
+
+  const placeholder = plan.addresses[0].residents[0];
+  assert.strictEqual(placeholder.addressPlaceholder, true);
+  assert.strictEqual(placeholder.risk, 'none');
+  assert.strictEqual(placeholder.row[2], 'Placeholder Resident');
+  assert.strictEqual(placeholder.row[3], true);
+});
+
+test('planPullNewResidentsFromFolder: skips a redundant placeholder for an existing master address', () => {
+  const master: Grid = [
+    ['address_id', 'resident_id', 'Resident Name', 'Address Placeholder'],
+    ['A1', 'M1', 'Existing Person', false],
+  ];
+  const captain: Grid = [
+    ['address_id', 'resident_id', 'Resident Name', 'Address Placeholder'],
+    ['A1', 'C1', 'Placeholder Resident', true],
+  ];
+  const plan = planPullNewResidentsFromFolder(
+    master,
+    [{ spreadsheetId: 'S1', spreadsheetName: 'Zone 1', tabName: 'Sheet1', zone: 'Zone 1', grid: captain }],
+    { requiredColumns: [] }
+  );
+
+  assert.strictEqual(plan.addresses.length, 0);
+  assert.match(plan.skipped[0].reason, /already has a master row/i);
+});
+
+test('planPullNewResidentsFromFolder: blocks multiple placeholders for one new address', () => {
+  const master: Grid = [['address_id', 'resident_id', 'Resident Name', 'Address Placeholder']];
+  const captain: Grid = [
+    ['address_id', 'resident_id', 'Resident Name', 'Address Placeholder'],
+    ['A2', 'C1', 'Placeholder Resident', true],
+    ['A2', 'C2', 'Placeholder Resident', true],
+  ];
+  const plan = planPullNewResidentsFromFolder(
+    master,
+    [{ spreadsheetId: 'S1', spreadsheetName: 'Zone 1', tabName: 'Sheet1', zone: 'Zone 1', grid: captain }],
+    { requiredColumns: [] }
+  );
+
+  assert.strictEqual(plan.addresses.length, 0);
+  assert.match(plan.blocked[0].reason, /more than one placeholder/i);
+});
+
+test('planPullNewResidentsFromFolder: blocks placeholders when the master lacks contract columns', () => {
+  const master: Grid = [['address_id', 'resident_id']];
+  const captain: Grid = [
+    ['address_id', 'resident_id', 'Resident Name', 'Address Placeholder'],
+    ['A2', 'C1', 'Placeholder Resident', true],
+  ];
+  const plan = planPullNewResidentsFromFolder(
+    master,
+    [{ spreadsheetId: 'S1', spreadsheetName: 'Zone 1', tabName: 'Sheet1', zone: 'Zone 1', grid: captain }],
+    { requiredColumns: [] }
+  );
+
+  assert.strictEqual(plan.addresses.length, 0);
+  assert.match(plan.blocked[0].reason, /missing a required field/i);
+});
+
+test('planPullNewResidentsFromFolder: blocks TRUE placeholders with a real-looking name', () => {
+  const master: Grid = [['address_id', 'resident_id', 'Resident Name', 'Address Placeholder']];
+  const captain: Grid = [
+    ['address_id', 'resident_id', 'Resident Name', 'Address Placeholder'],
+    ['A2', 'C1', 'Ada Lovelace', true],
+  ];
+  const plan = planPullNewResidentsFromFolder(
+    master,
+    [{ spreadsheetId: 'S1', spreadsheetName: 'Zone 1', tabName: 'Sheet1', zone: 'Zone 1', grid: captain }],
+    { requiredColumns: [] }
+  );
+
+  assert.strictEqual(plan.addresses.length, 0);
+  assert.match(plan.blocked[0].reason, /not exactly "Placeholder Resident"/i);
+});
+
+test('planPullNewResidentsFromFolder: cannot carry sales values from captain sheets', () => {
+  const master: Grid = [
+    ['address_id', 'resident_id', 'Resident Name', 'Latest New Owner', 'Sales History'],
+  ];
+  const captain: Grid = [
+    ['address_id', 'resident_id', 'Resident Name', 'Latest New Owner', 'Sales History'],
+    ['A2', 'C1', 'New Person', 'Legacy owner', 'Legacy sale'],
+  ];
+  const plan = planPullNewResidentsFromFolder(master, [
+    { spreadsheetId: 'S1', spreadsheetName: 'Zone 1', tabName: 'Sheet1', zone: 'Zone 1', grid: captain },
+  ]);
+
+  assert.deepStrictEqual(plan.addresses[0].residents[0].row, ['A2', 'C1', 'New Person', '', '']);
 });

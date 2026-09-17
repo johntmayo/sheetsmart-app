@@ -7,7 +7,7 @@
 // interrupted live jobs safe to re-run: identity is matched by key, blanks are
 // filled, rows are appended-if-absent (handoff 4.8).
 
-import { CellValue } from './values';
+import { CellValue, type FieldMetaMap, valueForTypedWrite } from './values';
 import { decideWrite, Policy } from './writeGuard';
 
 export const SOURCE_ROW_KEY = '__sourceRowNumber';
@@ -59,6 +59,7 @@ export interface CellFillResult {
 
 export interface CellFillOptions {
   policies?: Record<string, string>;
+  fieldMeta?: FieldMetaMap;
   defaultPolicy?: string;
   protectedColumns?: string[];
 }
@@ -90,6 +91,8 @@ export interface PushMissingResult {
 
 export interface PushMissingOptions {
   sensitiveColumns?: string[];
+  /** Target headers allowed to receive master values. Omit for generic legacy behavior. */
+  distributedColumns?: string[];
 }
 
 export function trimHeaders(row: CellValue[] | undefined): string[] {
@@ -122,13 +125,11 @@ export function buildSourceLookup(
 // Convert a mapped source value to a write value. Minimal for now: normalize
 // boolean-looking strings. (Date-serial coercion is a Phase-3 concern once the
 // parity harness is wired; see handoff 4.6.)
-export function normalizeSourceValueForWrite(value: CellValue): CellValue {
-  if (typeof value === 'string') {
-    const lower = value.trim().toLowerCase();
-    if (lower === 'true') return true;
-    if (lower === 'false') return false;
-  }
-  return value;
+export function normalizeSourceValueForWrite(
+  value: CellValue,
+  fieldMeta?: FieldMetaMap[string]
+): CellValue {
+  return valueForTypedWrite(value, fieldMeta);
 }
 
 /**
@@ -143,6 +144,7 @@ export function planCellFill(
   options: CellFillOptions = {}
 ): CellFillResult {
   const policies = options.policies || {};
+  const fieldMeta = options.fieldMeta || {};
   const defaultPolicy = options.defaultPolicy || 'fill_blank';
   const protectedColumns = options.protectedColumns;
 
@@ -197,11 +199,19 @@ export function planCellFill(
       const colIdx = targetColIdx[c];
       if (colIdx === -1) continue;
       const map = columnMap[c];
-      const source = normalizeSourceValueForWrite(sourceRow[map.source]);
+      const meta = fieldMeta[map.target] || fieldMeta[map.source];
+      const source = normalizeSourceValueForWrite(sourceRow[map.source], meta);
       const target = colIdx < originalWidth ? targetData[r][colIdx] : undefined;
       const policy = policies[map.target] || policies[map.source] || defaultPolicy;
 
-      const d = decideWrite({ column: map.target, target, source, policy, protectedColumns });
+      const d = decideWrite({
+        column: map.target,
+        target,
+        source,
+        policy,
+        protectedColumns,
+        fieldMeta: meta,
+      });
       const entry: CellFillEntry = {
         row: r + 1,
         column: map.target,
@@ -236,6 +246,9 @@ export function planPushMissingResidents(
   options: PushMissingOptions = {}
 ): PushMissingResult {
   const sensitiveColumns = options.sensitiveColumns || [];
+  const distributedColumns = options.distributedColumns
+    ? new Set(options.distributedColumns.map((column) => String(column).trim()))
+    : null;
   const result: PushMissingResult = {
     appended: [],
     flagged: [],
@@ -299,7 +312,11 @@ export function planPushMissingResidents(
       result.skipped.push({ residentId: masterId, residentName: name, masterRow: mr + 1, reason: 'resident_id already present' });
       continue;
     }
-    const newRow = targetHeaders.map((_h, c) => (colMap[c] === -1 ? '' : masterRow[colMap[c]]));
+    const newRow = targetHeaders.map((header, c) =>
+      colMap[c] === -1 || (distributedColumns && !distributedColumns.has(header))
+        ? ''
+        : masterRow[colMap[c]]
+    );
     const flaggedCols: string[] = [];
     sensitiveMasterCols.forEach((sc, i) => {
       const sv = masterRow[sc];

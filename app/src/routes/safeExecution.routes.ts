@@ -1,11 +1,17 @@
 import type { Request, Response, Router } from 'express';
 import type { Deps } from '../types';
+import * as appDb from '../db';
 import * as google from '../google';
 import * as jobs from '../jobs';
 import {
   APPLY_CONFLICT_COPY_TASK,
+  APPLY_DELETION_TASK,
+  ADDRESS_INTAKE_TASK,
+  CREATE_ZONE_SHEETS_TASK,
   DEFAULT_ENRICHMENT_TAB,
   ENRICH_ZONES_COPY_TASK,
+  FOLDER_CAPTAIN_IMPORT_TASK,
+  FOLDER_ZONE_RECONCILE_TASK,
   MOVE_RESIDENTS_COPY_TASK,
   PRODUCTION_MASTER_SPREADSHEET_ID,
   PULL_NEW_RESIDENTS_COPY_TASK,
@@ -14,7 +20,11 @@ import {
   REVERT_APPEND_COPY_TASK,
   REVERT_CELL_COPY_TASK,
   REVERT_MOVE_COPY_TASK,
+  REVERT_FOLDER_ZONE_RECONCILE_TASK,
+  REVERT_CREATE_ZONE_SHEETS_TASK,
+  REVERT_DELETION_TASK,
   pullCellKeys,
+  pullFieldMetaForHeaders,
   pullPoliciesForHeaders,
   type EnrichZonesPreviewPlan,
   type MoveCopyTarget,
@@ -26,6 +36,7 @@ import {
 } from '../executionTasks';
 import { planPushMissingResidents, trimHeaders, type Grid } from '../lib/mergeEngine';
 import { planGuardedAppends, planGuardedMoves } from '../lib/liveWriteEngine';
+import { filterGridByTombstones, loadActiveTombstones } from '../lib/tombstones';
 import {
   fingerprintPullCells,
   newResidentCellKeys,
@@ -47,6 +58,9 @@ import {
   isMapboxConfigured,
 } from '../mapbox';
 import { detectSheetZone, findColumn } from '../lib/columns';
+import { FOLDER_CLEANUP_TASK, REVERT_FOLDER_CLEANUP_TASK } from '../cleanupTasks';
+import { PUSH_FOLDER_TASK, PUSH_MISSING_FOLDER_TASK } from '../captainSyncTasks';
+import { MAPBOX_CONTACT_AUDIT_TASK } from '../mapboxContactAuditTasks';
 
 const SAFE_COPY_TARGET_KEY = 'safe_copy_execution_target';
 const SAFE_COPY_MOVE_TARGET_KEY = 'safe_copy_move_target';
@@ -113,9 +127,16 @@ export default function registerSafeExecutionRoutes(api: Router, { db }: Deps): 
         readGrid(target.captainSpreadsheetId, target.captainTab),
       ]);
       const sensitive = db
-        .all<{ canonical_name: string }>('SELECT canonical_name FROM dictionary_fields WHERE is_sensitive = 1')
+        .all<{ canonical_name: string }>(
+          'SELECT canonical_name FROM dictionary_fields WHERE is_sensitive = 1 AND distribute_to_captain = 1'
+        )
         .map((row) => row.canonical_name);
-      const plan = planPushMissingResidents(captainGrid, masterGrid, { sensitiveColumns: sensitive });
+      const distributedColumns = captainDistributedHeaders(db, trimHeaders(captainGrid[0]));
+      const plan = planPushMissingResidents(
+        captainGrid,
+        filterGridByTombstones(masterGrid, loadActiveTombstones(db)),
+        { sensitiveColumns: sensitive, distributedColumns }
+      );
       if (plan.errors.length > 0) throw new Error(plan.errors.map((error) => error.message).join('; '));
       const guarded = planGuardedAppends(captainGrid, plan.newRows);
       if (guarded.errors.length > 0) throw new Error(guarded.errors.join('; '));
@@ -181,7 +202,7 @@ export default function registerSafeExecutionRoutes(api: Router, { db }: Deps): 
       return res.status(400).json({ error: 'The preview found no rows to add.' });
     }
 
-    const queued = jobs.enqueue({
+    const queued = enqueueApprovedPreview(res, previewRunId, 'preview_push_missing_copy', {
       workflowName: 'Safe copy: add missing residents',
       type: PUSH_MISSING_COPY_TASK,
       mode: 'live',
@@ -191,6 +212,7 @@ export default function registerSafeExecutionRoutes(api: Router, { db }: Deps): 
         expectedResidentIds: plan.expectedResidentIds,
       },
     });
+    if (!queued) return;
     plan.appliedRunId = queued.runId;
     const stored = { ...safeJson(preview.summary_json), ...plan };
     db.run('UPDATE runs SET summary_json = ? WHERE id = ?', [JSON.stringify(stored), previewRunId]);
@@ -299,7 +321,8 @@ export default function registerSafeExecutionRoutes(api: Router, { db }: Deps): 
         readGrid(target.captainSpreadsheetId, target.captainTab),
       ]);
       const policies = pullPoliciesForHeaders(trimHeaders(masterGrid[0]));
-      const plan = planPullToMaster(masterGrid, captainGrid, { policies });
+      const fieldMeta = pullFieldMetaForHeaders(trimHeaders(masterGrid[0]));
+      const plan = planPullToMaster(masterGrid, captainGrid, { policies, fieldMeta });
       if (plan.errors.length > 0) throw new Error(plan.errors.join('; '));
 
       const changes = [...plan.fills, ...plan.overwrites];
@@ -392,7 +415,7 @@ export default function registerSafeExecutionRoutes(api: Router, { db }: Deps): 
     }
 
     const fingerprint = fingerprintPullCells(approvedCells);
-    const queued = jobs.enqueue({
+    const queued = enqueueApprovedPreview(res, previewRunId, 'preview_pull_to_master_copy', {
       workflowName: 'Safe copy: pull captain edits into master',
       type: PULL_TO_MASTER_COPY_TASK,
       mode: 'live',
@@ -403,6 +426,7 @@ export default function registerSafeExecutionRoutes(api: Router, { db }: Deps): 
         fingerprint,
       },
     });
+    if (!queued) return;
     plan.appliedRunId = queued.runId;
     plan.expectedCells = approvedCells;
     plan.fingerprint = fingerprint;
@@ -430,7 +454,12 @@ export default function registerSafeExecutionRoutes(api: Router, { db }: Deps): 
         readGrid(target.masterSpreadsheetId, target.masterTab),
         readGrid(target.captainSpreadsheetId, target.captainTab),
       ]);
-      const plan = planPullNewResidents(masterGrid, captainGrid);
+      const tombstones = loadActiveTombstones(db);
+      const plan = planPullNewResidents(
+        filterGridByTombstones(masterGrid, tombstones),
+        filterGridByTombstones(captainGrid, tombstones),
+        { forbiddenColumns: appDb.zoneDashboardSalesHeaders() }
+      );
       if (plan.errors.length > 0) throw new Error(plan.errors.join('; '));
 
       const flagged = plan.candidates.filter((candidate) => candidate.risk !== 'none');
@@ -526,7 +555,7 @@ export default function registerSafeExecutionRoutes(api: Router, { db }: Deps): 
     }
 
     const fingerprint = fingerprintPullCells(approvedRows);
-    const queued = jobs.enqueue({
+    const queued = enqueueApprovedPreview(res, previewRunId, 'preview_pull_new_residents_copy', {
       workflowName: 'Safe copy: add captain-created residents to master',
       type: PULL_NEW_RESIDENTS_COPY_TASK,
       mode: 'live',
@@ -537,6 +566,7 @@ export default function registerSafeExecutionRoutes(api: Router, { db }: Deps): 
         fingerprint,
       },
     });
+    if (!queued) return;
     plan.appliedRunId = queued.runId;
     plan.expectedRows = approvedRows;
     plan.fingerprint = fingerprint;
@@ -547,7 +577,7 @@ export default function registerSafeExecutionRoutes(api: Router, { db }: Deps): 
 
   api.post('/conflicts/apply', (req: Request, res: Response) => {
     if (req.body?.confirmed !== true) {
-      return res.status(400).json({ error: 'Please confirm before writing captain values to the master copy.' });
+      return res.status(400).json({ error: 'Please confirm before writing captain values to the master.' });
     }
     const conflictIds = Array.isArray(req.body?.conflictIds)
       ? (req.body.conflictIds as unknown[]).map((id) => Number(id)).filter((id) => Number.isInteger(id) && id > 0)
@@ -748,7 +778,7 @@ export default function registerSafeExecutionRoutes(api: Router, { db }: Deps): 
       ? plan.destinationFields
       : { ZoneName: plan.toZone };
 
-    const queued = jobs.enqueue({
+    const queued = enqueueApprovedPreview(res, previewRunId, 'preview_move_residents_copy', {
       workflowName: 'Safe copy: move residents between captain sheets',
       type: MOVE_RESIDENTS_COPY_TASK,
       mode: 'live',
@@ -762,6 +792,7 @@ export default function registerSafeExecutionRoutes(api: Router, { db }: Deps): 
         destinationFields,
       },
     });
+    if (!queued) return;
     plan.appliedRunId = queued.runId;
     plan.expectedResidentIds = approvedIds;
     plan.fingerprint = fingerprint;
@@ -796,7 +827,7 @@ export default function registerSafeExecutionRoutes(api: Router, { db }: Deps): 
       return res.status(400).json({ error: 'The preview found nothing to write.' });
     }
 
-    const queued = jobs.enqueue({
+    const queued = enqueueApprovedPreview(res, previewRunId, 'preview_enrich_zones_copy', {
       workflowName: 'Safe copy: enrich zones on master',
       type: ENRICH_ZONES_COPY_TASK,
       mode: 'live',
@@ -808,6 +839,7 @@ export default function registerSafeExecutionRoutes(api: Router, { db }: Deps): 
         columnsToAdd: plan.columnsToAdd,
       },
     });
+    if (!queued) return;
     plan.appliedRunId = queued.runId;
     const stored = { ...safeJson(preview.summary_json), ...plan };
     db.run('UPDATE runs SET summary_json = ? WHERE id = ?', [JSON.stringify(stored), previewRunId]);
@@ -825,8 +857,13 @@ export default function registerSafeExecutionRoutes(api: Router, { db }: Deps): 
     }
     let revertType = '';
     let remaining = 0;
-    if (original.type === PUSH_MISSING_COPY_TASK || original.type === PULL_NEW_RESIDENTS_COPY_TASK) {
-      if (original.status !== 'succeeded') {
+    if (
+      original.type === PUSH_MISSING_COPY_TASK ||
+      original.type === PULL_NEW_RESIDENTS_COPY_TASK ||
+      original.type === FOLDER_CAPTAIN_IMPORT_TASK ||
+      original.type === ADDRESS_INTAKE_TASK
+    ) {
+      if (!['succeeded', 'failed', 'interrupted'].includes(original.status)) {
         return res.status(409).json({ error: 'Wait for the live run to finish before reverting it.' });
       }
       revertType = REVERT_APPEND_COPY_TASK;
@@ -838,7 +875,7 @@ export default function registerSafeExecutionRoutes(api: Router, { db }: Deps): 
         )?.n || 0;
     } else if (original.type === ENRICH_ZONES_COPY_TASK) {
       // Failed enrichments may still have written headers/partial cells; allow undo.
-      if (original.status !== 'succeeded' && original.status !== 'failed') {
+      if (!['succeeded', 'failed', 'interrupted'].includes(original.status)) {
         return res.status(409).json({ error: 'Wait for the live run to finish before reverting it.' });
       }
       revertType = REVERT_CELL_COPY_TASK;
@@ -849,7 +886,7 @@ export default function registerSafeExecutionRoutes(api: Router, { db }: Deps): 
           [originalRunId]
         )?.n || 0;
     } else if (original.type === PULL_TO_MASTER_COPY_TASK || original.type === APPLY_CONFLICT_COPY_TASK) {
-      if (original.status !== 'succeeded' && original.status !== 'failed') {
+      if (!['succeeded', 'failed', 'interrupted'].includes(original.status)) {
         return res.status(409).json({ error: 'Wait for the live run to finish before reverting it.' });
       }
       revertType = REVERT_CELL_COPY_TASK;
@@ -860,7 +897,7 @@ export default function registerSafeExecutionRoutes(api: Router, { db }: Deps): 
           [originalRunId]
         )?.n || 0;
     } else if (original.type === MOVE_RESIDENTS_COPY_TASK) {
-      if (original.status !== 'succeeded' && original.status !== 'failed') {
+      if (!['succeeded', 'failed', 'interrupted'].includes(original.status)) {
         return res.status(409).json({ error: 'Wait for the live run to finish before reverting it.' });
       }
       revertType = REVERT_MOVE_COPY_TASK;
@@ -870,10 +907,82 @@ export default function registerSafeExecutionRoutes(api: Router, { db }: Deps): 
            WHERE run_id = ? AND operation IN ('row_append', 'row_delete') AND reverted_by_run_id IS NULL`,
           [originalRunId]
         )?.n || 0;
+    } else if (original.type === FOLDER_ZONE_RECONCILE_TASK) {
+      if (!['succeeded', 'failed', 'interrupted'].includes(original.status)) {
+        return res.status(409).json({ error: 'Wait for the live run to finish before reverting it.' });
+      }
+      revertType = REVERT_FOLDER_ZONE_RECONCILE_TASK;
+      remaining =
+        db.get<{ n: number }>(
+          `SELECT COUNT(*) AS n FROM run_snapshots
+           WHERE run_id = ? AND operation IN ('cell_update','row_append','row_delete')
+             AND reverted_by_run_id IS NULL`,
+          [originalRunId]
+        )?.n || 0;
+    } else if (original.type === CREATE_ZONE_SHEETS_TASK) {
+      if (!['succeeded', 'failed', 'interrupted'].includes(original.status)) {
+        return res.status(409).json({ error: 'Wait for the live run to finish before reverting it.' });
+      }
+      revertType = REVERT_CREATE_ZONE_SHEETS_TASK;
+      remaining =
+        db.get<{ n: number }>(
+          `SELECT COUNT(*) AS n FROM run_created_files
+           WHERE run_id=? AND reverted_by_run_id IS NULL`,
+          [originalRunId]
+        )?.n || 0;
+    } else if (original.type === APPLY_DELETION_TASK) {
+      if (!['succeeded', 'failed', 'interrupted'].includes(original.status)) {
+        return res.status(409).json({ error: 'Wait for the live run to finish before reverting it.' });
+      }
+      revertType = REVERT_DELETION_TASK;
+      remaining =
+        db.get<{ n: number }>(
+          `SELECT COUNT(*) AS n FROM run_snapshots
+           WHERE run_id=? AND operation IN ('row_append','row_delete')
+             AND reverted_by_run_id IS NULL`,
+          [originalRunId]
+        )?.n || 0;
+    } else if (original.type === PUSH_MISSING_FOLDER_TASK) {
+      if (!['succeeded', 'failed', 'interrupted'].includes(original.status)) {
+        return res.status(409).json({ error: 'Wait for the live run to finish before reverting it.' });
+      }
+      revertType = REVERT_APPEND_COPY_TASK;
+      remaining =
+        db.get<{ n: number }>(
+          `SELECT COUNT(*) AS n FROM run_snapshots
+           WHERE run_id = ? AND operation = 'row_append' AND reverted_by_run_id IS NULL`,
+          [originalRunId]
+        )?.n || 0;
+    } else if (
+      original.type === PUSH_FOLDER_TASK ||
+      original.type === 'pull_folder' ||
+      original.type === MAPBOX_CONTACT_AUDIT_TASK
+    ) {
+      if (!['succeeded', 'failed', 'interrupted'].includes(original.status)) {
+        return res.status(409).json({ error: 'Wait for the live run to finish before reverting it.' });
+      }
+      revertType = REVERT_CELL_COPY_TASK;
+      remaining =
+        db.get<{ n: number }>(
+          `SELECT COUNT(*) AS n FROM run_snapshots
+           WHERE run_id = ? AND operation = 'cell_update' AND reverted_by_run_id IS NULL`,
+          [originalRunId]
+        )?.n || 0;
+    } else if (original.type === FOLDER_CLEANUP_TASK) {
+      if (!['succeeded', 'failed', 'interrupted'].includes(original.status)) {
+        return res.status(409).json({ error: 'Wait for the cleanup run to finish before undoing it.' });
+      }
+      revertType = REVERT_FOLDER_CLEANUP_TASK;
+      remaining =
+        db.get<{ n: number }>(
+          `SELECT COUNT(*) AS n FROM cleanup_sheet_snapshots
+           WHERE run_id=? AND reverted_by_run_id IS NULL`,
+          [originalRunId]
+        )?.n || 0;
     } else {
       return res.status(400).json({
         error:
-          'Only safe-copy append, zone-enrichment, resident-move, pull, or conflict-resolution runs can be reverted here.',
+          'Only supported append, zone-enrichment, resident-move, pull, reconciliation, or conflict-resolution runs can be reverted here.',
       });
     }
 
@@ -892,7 +1001,10 @@ export default function registerSafeExecutionRoutes(api: Router, { db }: Deps): 
       workflowName: `Revert live run #${originalRunId}`,
       type: revertType,
       mode: 'live',
-      params: { originalRunId },
+      params: {
+        originalRunId,
+        allowProductionMaster: revertType === REVERT_DELETION_TASK,
+      },
     });
     db.run('UPDATE runs SET summary_json = ? WHERE id = ?', [
       JSON.stringify({ ...originalSummary, revertRunId: queued.runId }),
@@ -1168,6 +1280,21 @@ function resolveZoneConfig(db: Deps['db'], masterHeaders: string[]): ZoneReconci
   };
 }
 
+function captainDistributedHeaders(db: Deps['db'], headers: string[]): string[] {
+  return db
+    .all<{ id: number; canonical_name: string }>(
+      `SELECT id, canonical_name FROM dictionary_fields
+       WHERE distribute_to_captain=1 ORDER BY sort_order, id`
+    )
+    .map((field) => {
+      const aliases = db
+        .all<{ alias: string }>('SELECT alias FROM dictionary_aliases WHERE field_id=?', [field.id])
+        .map((row) => row.alias);
+      return findColumn(headers, [field.canonical_name, ...aliases]);
+    })
+    .filter((header): header is string => Boolean(header));
+}
+
 function loadZoneSource(db: Deps['db']): { username: string; datasetId: string } {
   const raw = db.getSetting(ZONE_SOURCE_KEY, '');
   if (raw) {
@@ -1182,6 +1309,27 @@ function loadZoneSource(db: Deps['db']): { username: string; datasetId: string }
     }
   }
   return { username: DEFAULT_MAPBOX_USERNAME, datasetId: DEFAULT_MAPBOX_DATASET_ID };
+}
+
+function enqueueApprovedPreview(
+  res: Response,
+  previewRunId: number,
+  expectedType: string,
+  args: jobs.EnqueueArgs
+): { runId: number; jobId: number } | null {
+  try {
+    return jobs.enqueueFromPreview(previewRunId, expectedType, args);
+  } catch (error) {
+    if (error instanceof jobs.PreviewAlreadyClaimedError) {
+      res.status(409).json({ error: error.message });
+      return null;
+    }
+    if (error instanceof jobs.PreviewUnavailableError) {
+      res.status(400).json({ error: error.message });
+      return null;
+    }
+    throw error;
+  }
 }
 
 function safeJson(json: string): Record<string, unknown> {

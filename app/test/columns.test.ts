@@ -1,6 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert';
-import { normalizeKey, findColumn, resolveColumn, detectSheetZone, columnLetter } from '../src/lib/columns';
+import {
+  normalizeKey,
+  findColumn,
+  resolveColumn,
+  detectSheetZone,
+  detectSheetZoneWithName,
+  columnLetter,
+  canonicalizeHeaders,
+} from '../src/lib/columns';
 
 test('normalizeKey lowercases and strips non-alphanumerics', () => {
   assert.strictEqual(normalizeKey('House #'), 'house');
@@ -34,6 +42,39 @@ test('resolveColumn reports match details for the audit', () => {
   assert.strictEqual(miss.index, -1);
 });
 
+test('canonicalizeHeaders joins different aliases without changing column order', () => {
+  const result = canonicalizeHeaders(
+    ['resident id', 'mobile', 'Unmanaged Column'],
+    [
+      { canonicalName: 'resident_id', aliases: ['resident id', 'residentid'] },
+      { canonicalName: 'Cell', aliases: ['mobile', 'cell phone'] },
+    ]
+  );
+  assert.deepStrictEqual(result, {
+    headers: ['resident_id', 'Cell', 'Unmanaged Column'],
+    errors: [],
+  });
+});
+
+test('canonicalizeHeaders blocks two columns that resolve to one field', () => {
+  const result = canonicalizeHeaders(
+    ['Cell', 'mobile'],
+    [{ canonicalName: 'Cell', aliases: ['mobile'] }]
+  );
+  assert.match(result.errors[0], /More than one column resolves/);
+});
+
+test('canonicalizeHeaders prefers an exact standard name over another field alias', () => {
+  const result = canonicalizeHeaders(
+    ['House'],
+    [
+      { canonicalName: 'House', aliases: [] },
+      { canonicalName: '_SitusHouseNo', aliases: ['House'] },
+    ]
+  );
+  assert.deepStrictEqual(result, { headers: ['House'], errors: [] });
+});
+
 test('detectSheetZone returns the mode of ZoneName, robust to stray rows', () => {
   const headers = ['resident_id', 'ZoneName'];
   const rows = [
@@ -48,6 +89,43 @@ test('detectSheetZone returns the mode of ZoneName, robust to stray rows', () =>
 
 test('detectSheetZone returns empty when no ZoneName column exists', () => {
   assert.strictEqual(detectSheetZone(['a', 'b'], [[1, 2]]), '');
+});
+
+test('detectSheetZone returns empty when two zones are tied', () => {
+  assert.strictEqual(
+    detectSheetZone(
+      ['resident_id', 'ZoneName'],
+      [
+        ['1', 'Zone 1'],
+        ['2', 'Zone 2'],
+      ]
+    ),
+    ''
+  );
+});
+
+test('detectSheetZoneWithName safely falls back to a strict Zone-number filename', () => {
+  assert.strictEqual(
+    detectSheetZoneWithName(['resident_id', 'ZoneName'], [['1', '']], 'Zone 148 - Theresa Costanzo'),
+    'Zone 148'
+  );
+  assert.strictEqual(
+    detectSheetZoneWithName(
+      ['resident_id', 'ZoneName', 'ZoneName'],
+      [['1', 'Zone 24', 'Zone 148']],
+      'Zone 148 - Theresa Costanzo'
+    ),
+    ''
+  );
+  assert.strictEqual(
+    detectSheetZoneWithName(
+      ['resident_id', 'ZoneName', 'ZoneName'],
+      [['1', '', '']],
+      'Zone 148 - Theresa Costanzo'
+    ),
+    'Zone 148'
+  );
+  assert.strictEqual(detectSheetZoneWithName(['resident_id'], [['1']], 'Unrelated spreadsheet 148'), '');
 });
 
 test('columnLetter matches spreadsheet lettering', () => {

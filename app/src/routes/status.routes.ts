@@ -27,6 +27,7 @@ export default function registerStatusRoutes(api: Router, { db }: Deps): void {
         configured: google.isConfigured(),
         // Safe to surface for confirmation; never exposes the private key.
         clientEmail: google.isConfigured() ? google.getClientEmail() : null,
+        impersonateUser: google.isConfigured() ? google.getImpersonatedUser() : null,
       },
       connections: {
         master: byType('master'),

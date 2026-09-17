@@ -93,3 +93,20 @@ test('planPushMissingResidents errors clearly when target lacks required columns
   assert.strictEqual(plan.errors.length, 1);
   assert.match(plan.errors[0].message, /ZoneName/);
 });
+
+test('planPushMissingResidents blanks master-only fields in captain appends', () => {
+  const master = [
+    ['resident_id', 'ZoneName', 'Resident Name', 'Latest Sale Price'],
+    ['R1', 'Zone A', 'Ann', 750000],
+    ['R2', 'Zone A', 'Bob', 825000],
+  ];
+  const target = [
+    ['resident_id', 'ZoneName', 'Resident Name', 'Latest Sale Price'],
+    ['R1', 'Zone A', 'Ann', ''],
+  ];
+  const plan = planPushMissingResidents(target, master, {
+    distributedColumns: ['resident_id', 'ZoneName', 'Resident Name'],
+  });
+
+  assert.deepStrictEqual(plan.newRows, [['R2', 'Zone A', 'Bob', '']]);
+});

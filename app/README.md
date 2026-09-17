@@ -27,7 +27,7 @@ of the safety engine:
   and **read-only** folder listing + header reads. Nothing writes to a sheet yet.
 - **Read-only "Test connection"** — lists the captain folder's spreadsheets and
   reads the master's headers (the Phase 0 gate).
-- **Config screens** — Connections, Workflows (all 12 types), column mappings,
+- **Config screens** — Connections, current workflow types, column mappings,
   column policies, and the sensitive-columns list — all saved in the database.
 - **In-process job runner** (`jobs.js`) with restart-durability, ready for the
   audit/dry-run/live jobs added in later phases.
@@ -83,6 +83,20 @@ Plus **Phase B and the first Phase-C vertical slice**:
   enrichment, captain-sheet moves, pull + conflict resolution, and adding
   captain-created residents each ran live on copies and were undone, leaving the
   copies in their starting state.
+
+### Sales ownership at launch
+
+Zone Dashboard is the only current sales-data source. SheetSmart does not offer
+the former sales-to-master preview or allow new `import_to_master` sales
+workflows. Historical runs and their old type names remain readable.
+
+The seven historical sales columns remain on the master, but SheetSmart locks
+them to **Never write** and **Master only**: `Address - For Sale`,
+`Address - Sold Since Fire`, `Latest Sale Date`, `Latest Sale Price`,
+`Latest New Owner`, `Lot SqFt`, and `Sales History`. Captain pulls,
+captain-created resident imports, and conflict resolution cannot populate or
+replace those master values. Captain sheets that still carry these legacy
+columns continue to be flagged by the alignment audit.
 
 **Still gated:** folder-wide live execution, production-sheet writes, and
 destructive schema operations. Every live playbook stays on copies until the
@@ -194,10 +208,33 @@ Section 9 of the handoff.)
    → give it **Editor** → Send.
 8. Open the Google Drive **folder** of 120 captain sheets → **Share** → same
    email → **Editor** → Send.
-9. Do the same for the **sales tracker** / any external source spreadsheet.
+8b. **Captain-sheet creation needs one extra step.** The bot can *read* a My Drive
+    folder you share with it, but Google will *not* let it *create* files there —
+    you get a misleading "storage quota exceeded" error even when
+    `info@altagether.org` has plenty of space. Pick **one** fix:
+
+    **Option A — Shared Drive (simplest operationally):**
+    1. In Drive → **Shared drives** → **New** (requires Google Workspace).
+    2. Add `info@altagether.org` as Manager and the bot email as Content manager.
+    3. Move the captain sheets folder into that Shared Drive.
+    4. Update the SheetSmart **captain_folder** connection if the folder ID changed.
+
+    **Option B — Domain-wide delegation (keep the folder in My Drive):**
+    1. Open the service-account JSON and copy its numeric **`client_id`** (not the
+       email address).
+    2. [Google Admin](https://admin.google.com) → **Security** → **API controls**
+       → **Domain-wide delegation** → **Add new**.
+    3. Paste the client ID. Scopes (one line):
+       `https://www.googleapis.com/auth/spreadsheets,https://www.googleapis.com/auth/drive`
+    4. In `.env` set `GOOGLE_IMPERSONATE_USER=info@altagether.org` and restart the app.
+       SheetSmart will then create files as that user, so they are owned by
+       `info@altagether.org`.
+9. If you use the occasional address-intake workflow, share that **outside
+   address list** with the bot. This source is optional for normal operation.
 10. In SheetSmart → **Connections → Add connection**, create one entry each for
-    the master (type *master*), the captain folder (type *captain_folder*), and
-    the sales tracker (type *external*). The Google ID comes from the URL:
+    the master (type *master*) and captain folder (type *captain_folder*).
+    Add an outside address list (type *external*) only when address intake needs
+    one. The Google ID comes from the URL:
     `.../spreadsheets/d/THIS_PART/edit` for sheets, `.../folders/THIS_PART` for a
     folder. Click **Test** on each — the master should show its headers and the
     folder should list all the captain sheets. **That is the Phase 0 gate.**
@@ -210,11 +247,10 @@ Section 9 of the handoff.)
 12. Learn Google Sheets **Version history** as a second safety net. SheetSmart
     now owns snapshot-backed undo for its first copies-only live playbook.
 
-### D. Hosting (later, when you want it online — see handoff Section 9D/E)
-Render.com paid always-on instance (~$7/mo) + a small persistent disk for the
-SQLite file, deployed from a **private** GitHub repo. The `.env` values become
-Render environment variables; `DATABASE_PATH` must point at the persistent disk
-(e.g. `/var/data/sheetsmart.sqlite`).
+### D. Hosting (go live on Render)
+See **[DEPLOY.md](../DEPLOY.md)** at the repo root for step-by-step instructions:
+Render paid always-on instance (~$7/mo), persistent disk, environment variables,
+and first-login setup.
 
 ---
 

@@ -11,9 +11,9 @@ import { Runs } from './pages/Runs';
 import { Conflicts } from './pages/Conflicts';
 
 const NAV = [
-  { to: '/', label: 'Health', end: true },
+  { to: '/', label: 'Dashboard', end: true },
   { to: '/sources', label: 'Sources' },
-  { to: '/dictionary', label: 'Field Dictionary' },
+  { to: '/dictionary', label: 'Fields' },
   { to: '/playbooks', label: 'Playbooks' },
   { to: '/runs', label: 'Runs' },
   { to: '/conflicts', label: 'Conflicts' },
@@ -55,7 +55,7 @@ function Shell({ onSignOut }: { onSignOut: () => void }) {
         <div className="brand-mark">S</div>
         <h1>SheetSmart</h1>
         <div className="header-actions">
-          <span className="who">Admin</span>
+          <span className="who">Signed in</span>
           <button className="btn secondary small" onClick={signOut}>
             Sign out
           </button>

@@ -15,6 +15,7 @@ interface ConflictRow {
   resident_id: string;
   existing_value: string;
   incoming_value: string;
+  resolution_notes?: string;
   context_json?: string;
 }
 
@@ -23,6 +24,11 @@ interface ConflictContext {
   tabName?: string;
   sourceName?: string;
   residentName?: string;
+  masterDisplay?: string;
+  captainDisplay?: string;
+  reason?: string;
+  suspectedTextCoercion?: boolean;
+  revalidationStatus?: 'current' | 'stale' | 'equivalent';
 }
 
 export function Conflicts() {
@@ -69,16 +75,19 @@ export function Conflicts() {
   if (loading) return <Spinner />;
   if (error) return <ErrorState message={error} />;
   const rows = data ?? [];
-  const applicable = rows.filter((row) => parseContext(row).kind === 'pull_to_master');
+  const applicable = rows.filter((row) => {
+    const context = parseContext(row);
+    return context.kind === 'pull_to_master' && context.revalidationStatus !== 'stale';
+  });
   const selectedCount = applicable.filter((row) => selected.has(row.id)).length;
 
   return (
     <>
       <SectionHead title="Conflict inbox" />
       <p className="reading-copy" style={{ marginTop: 0 }}>
-        Conflicts are disagreements between a source and a target value where the policy did not allow an overwrite.
-        SheetSmart logs them instead of overwriting, so a human decides. Applying a captain value writes it to the
-        master copy as its own recorded run, which you can undo from Runs.
+        The master and a captain sheet disagree, and SheetSmart did not know which value to keep automatically.
+        Accepting a captain&apos;s value updates the selected master sheet as a recorded run that you can undo from Runs.
+        Dismissing an item makes no sheet changes.
       </p>
       {actionError && <ErrorState message={actionError} />}
       {queued && (
@@ -94,7 +103,7 @@ export function Conflicts() {
           {applicable.length > 0 && (
             <div className="btn-row" style={{ marginBottom: 12 }}>
               <button className="btn highlight" onClick={applySelected} disabled={selectedCount === 0 || applying}>
-                {applying ? 'Starting safely…' : `Use captain value for ${selectedCount} selected`}
+                {applying ? 'Starting safely…' : `Accept captain’s value for ${selectedCount} selected`}
               </button>
             </div>
           )}
@@ -116,7 +125,8 @@ export function Conflicts() {
               <tbody>
                 {rows.map((c) => {
                   const context = parseContext(c);
-                  const canApply = context.kind === 'pull_to_master';
+                  const canApply =
+                    context.kind === 'pull_to_master' && context.revalidationStatus !== 'stale';
                   return (
                     <tr key={c.id}>
                       <td>
@@ -132,11 +142,20 @@ export function Conflicts() {
                       <td className="truncate">{context.residentName || c.resident_id || '—'}</td>
                       <td>{c.row}</td>
                       <td>{c.column}</td>
-                      <td className="truncate">{c.existing_value}</td>
-                      <td className="truncate">{c.incoming_value}</td>
+                      <td>{expandableValue(context.masterDisplay || c.existing_value)}</td>
+                      <td>{expandableValue(context.captainDisplay || c.incoming_value)}</td>
                       <td>
+                        <div style={{ maxWidth: 300, marginBottom: 6 }}>
+                          {context.revalidationStatus === 'stale' ? (
+                            <strong>Stale — run a fresh pull before applying.</strong>
+                          ) : context.suspectedTextCoercion ? (
+                            <strong>Possible Sheets coercion — correct manually.</strong>
+                          ) : (
+                            context.reason || c.resolution_notes || 'Current typed values genuinely differ.'
+                          )}
+                        </div>
                         <button className="btn secondary small" onClick={() => resolve(c.id)}>
-                          Mark resolved
+                          Dismiss (no sheet change)
                         </button>
                       </td>
                     </tr>
@@ -148,6 +167,16 @@ export function Conflicts() {
         </>
       )}
     </>
+  );
+}
+
+function expandableValue(value: string) {
+  if (value.length <= 80) return <span>{value || '(blank)'}</span>;
+  return (
+    <details>
+      <summary>{value.slice(0, 77)}…</summary>
+      <div style={{ whiteSpace: 'pre-wrap', minWidth: 260 }}>{value}</div>
+    </details>
   );
 }
 
