@@ -194,7 +194,11 @@ a:hover {
   display: flex;
   align-items: center;
   gap: 12px;
+  margin-top: 32px;
   margin-bottom: 16px;
+}
+.section-head:first-child {
+  margin-top: 0;
 }
 .section-head h2 {
   margin: 0;
@@ -230,6 +234,11 @@ a:hover {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
   gap: 16px;
+  margin-bottom: 8px;
+}
+
+.card-grid + section {
+  margin-top: 24px;
 }
 
 .metric {
