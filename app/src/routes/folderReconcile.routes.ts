@@ -78,6 +78,18 @@ export default function registerFolderReconcileRoutes(api: Router, { db }: Deps)
       });
 
       const features = await fetchZoneFeatures(loadZoneSource(db));
+      const knownZoneNames = (features.features || [])
+        .map((feature) => String(feature.properties?.ZoneName ?? '').trim())
+        .filter(Boolean);
+      for (const sheet of captainSheets) {
+        sheet.zone = detectSheetZoneWithName(
+          (sheet.grid[0] || []).map(String),
+          sheet.grid.slice(1),
+          sheet.spreadsheetName,
+          'ZoneName',
+          knownZoneNames
+        );
+      }
       const masterHeaders = (masterGrid[0] || []).map((value) => String(value ?? '').trim());
       const resolve = (canonical: string): string | null => {
         const field = db.get<{ id: number }>('SELECT id FROM dictionary_fields WHERE canonical_name=?', [canonical]);

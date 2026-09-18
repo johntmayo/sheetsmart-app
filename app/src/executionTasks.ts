@@ -2176,8 +2176,8 @@ async function createZoneSheets(ctx: JobContext): Promise<unknown> {
     message: 'Rechecking Mapbox, the master, and the captain folder before creating any files.',
   });
   const masterGrid = await readGrid(masterSpreadsheetId, masterTab);
-  const captainSheets = await readCaptainFolder(folderId, 10);
   const features = await fetchZoneFeatures(loadZoneSource());
+  const captainSheets = await readCaptainFolder(folderId, 10, mapboxZoneNames(features));
   const fresh = planMissingZoneSheets(
     filterGridByTombstones(masterGrid, loadActiveTombstones(db)),
     captainSheets,
@@ -4003,8 +4003,8 @@ async function folderZoneReconcile(ctx: JobContext): Promise<unknown> {
 
   ctx.reportProgress({ stage: 'reading', message: 'Rechecking the master, captain folder, and Mapbox boundaries.' });
   const masterGrid = await readGrid(masterSpreadsheetId, masterTab);
-  const captainSheets = await readCaptainFolder(folderId);
   const features = await fetchZoneFeatures(loadZoneSource());
+  const captainSheets = await readCaptainFolder(folderId, 5, mapboxZoneNames(features));
   const cfg = resolveZoneConfig(trimHeaders(masterGrid[0]));
   const tombstones = loadActiveTombstones(db);
   const filteredMaster = filterGridByTombstones(masterGrid, tombstones, {
@@ -4290,7 +4290,17 @@ async function revertFolderZoneReconcile(ctx: JobContext): Promise<unknown> {
   return { moveResult, cellResult, message: 'The folder reconciliation was undone for every unchanged row and cell.' };
 }
 
-async function readCaptainFolder(folderId: string, concurrency = 5): Promise<CaptainSheetInput[]> {
+function mapboxZoneNames(features: Awaited<ReturnType<typeof fetchZoneFeatures>>): string[] {
+  return (features.features || [])
+    .map((feature) => String(feature.properties?.ZoneName ?? '').trim())
+    .filter(Boolean);
+}
+
+async function readCaptainFolder(
+  folderId: string,
+  concurrency = 5,
+  knownZoneNames: readonly string[] = []
+): Promise<CaptainSheetInput[]> {
   const files = await google.listSpreadsheetsInFolder(folderId);
   const sheets: CaptainSheetInput[] = [];
   await mapLimit(files, concurrency, async (file) => {
@@ -4299,7 +4309,7 @@ async function readCaptainFolder(folderId: string, concurrency = 5): Promise<Cap
       spreadsheetId: file.id,
       spreadsheetName: file.name,
       tabName: '',
-      zone: detectSheetZoneWithName(trimHeaders(grid[0]), grid.slice(1), file.name),
+      zone: detectSheetZoneWithName(trimHeaders(grid[0]), grid.slice(1), file.name, 'ZoneName', knownZoneNames),
       grid,
     });
   });

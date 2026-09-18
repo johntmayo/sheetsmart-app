@@ -88,6 +88,18 @@ export default function registerZoneSheetRoutes(api: Router, { db }: Deps): void
       const template = chooseTemplate(masterGrid, captainSheets);
       if (!template) throw new Error('No readable existing captain sheet is available as a formatting template.');
       const features = await fetchZoneFeatures(loadZoneSource(db));
+      const knownZoneNames = (features.features || [])
+        .map((feature) => String(feature.properties?.ZoneName ?? '').trim())
+        .filter(Boolean);
+      for (const sheet of captainSheets) {
+        sheet.zone = detectSheetZoneWithName(
+          trimHeaders(sheet.grid[0]),
+          sheet.grid.slice(1),
+          sheet.spreadsheetName,
+          'ZoneName',
+          knownZoneNames
+        );
+      }
       const plan = planMissingZoneSheets(
         filterGridByTombstones(masterGrid, loadActiveTombstones(db)),
         captainSheets,

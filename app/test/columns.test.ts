@@ -128,6 +128,33 @@ test('detectSheetZoneWithName safely falls back to a strict Zone-number filename
   assert.strictEqual(detectSheetZoneWithName(['resident_id'], [['1']], 'Unrelated spreadsheet 148'), '');
 });
 
+test('detectSheetZoneWithName recognizes an empty generated sheet using the Mapbox zone roster', () => {
+  assert.strictEqual(
+    detectSheetZoneWithName(
+      ['resident_id', 'ZoneName'],
+      [],
+      'The Meadows - Test Captain',
+      'ZoneName',
+      ['The Meadows', 'Mountain View']
+    ),
+    'The Meadows'
+  );
+  assert.strictEqual(
+    detectSheetZoneWithName(['resident_id', 'ZoneName'], [], 'The Meadows - Test Captain'),
+    ''
+  );
+  assert.strictEqual(
+    detectSheetZoneWithName(
+      ['resident_id', 'ZoneName'],
+      [['resident-1', 'Mountain View']],
+      'The Meadows - Test Captain',
+      'ZoneName',
+      ['The Meadows', 'Mountain View']
+    ),
+    ''
+  );
+});
+
 test('columnLetter matches spreadsheet lettering', () => {
   assert.strictEqual(columnLetter(0), 'A');
   assert.strictEqual(columnLetter(25), 'Z');

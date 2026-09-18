@@ -173,10 +173,20 @@ export function detectSheetZoneWithName(
   headers: Header[],
   dataRows: CellRow[],
   spreadsheetName: string,
-  zoneHeader = 'ZoneName'
+  zoneHeader = 'ZoneName',
+  knownZoneNames: readonly string[] = []
 ): string {
-  const match = String(spreadsheetName || '').match(/(?:^|[^a-z0-9])zone\s*(\d+)\b/i);
-  const fromName = match ? `Zone ${Number(match[1])}` : '';
+  const name = String(spreadsheetName || '').trim();
+  const knownNameMatches = [...new Set(knownZoneNames.map((zone) => zone.trim()).filter(Boolean))].filter(
+    (zone) => name === zone || name.startsWith(`${zone} - `)
+  );
+  const match = name.match(/(?:^|[^a-z0-9])zone\s*(\d+)\b/i);
+  const fromName =
+    knownNameMatches.length === 1
+      ? knownNameMatches[0]
+      : match
+        ? `Zone ${Number(match[1])}`
+        : '';
   const matchingHeaders = headers.filter(
     (header) => String(header == null ? '' : header).trim().toLowerCase() === zoneHeader.toLowerCase()
   );
